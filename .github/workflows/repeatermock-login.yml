@@ -1,4 +1,4 @@
-name: RepeaterMock Login + Browse
+name: RepeaterMock Login + Scrape
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
@@ -19,46 +19,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
-          pip install nodriver httpx playwright
-          python -m playwright install chromium
-          CHROME_BIN=$(find /home/runner/.cache/ms-playwright -name "chrome" -path "*/chrome-linux64/*" | head -1)
-          echo "Chrome: $CHROME_BIN"
-          "$CHROME_BIN" --version
-          echo "CHROME_PATH=$CHROME_BIN" >> $GITHUB_ENV
+        run: pip install httpx
 
-      - name: Run login script
+      - name: Run login + scrape script
         env:
+          NOCAPTCHA_API_KEY: ${{ secrets.NOCAPTCHA_API_KEY }}
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
-          CHROME_PATH: ${{ env.CHROME_PATH }}
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
-          rm -rf /tmp/ts_profile
           mkdir -p output
-          # Start Xvfb on a FIXED display (not xvfb-run -a which uses random displays)
-          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
-          XVFB_PID=$!
-          sleep 2
-          export DISPLAY=:99
-          # Verify Xvfb is running
-          ps -p $XVFB_PID > /dev/null && echo "Xvfb running on :99" || echo "Xvfb FAILED"
-          # Run the script (with retry)
-          python repeatermock_login.py || python repeatermock_login.py || python repeatermock_login.py
-          EXIT_CODE=$?
-          kill $XVFB_PID 2>/dev/null || true
-          exit $EXIT_CODE
-
-      - name: Verify login
-        if: always()
-        run: |
-          if [ ! -f output/cookies.json ]; then echo "No cookies.json"; exit 1; fi
-          ACCESS_TOKEN=$(python -c "import json; d=json.load(open('output/cookies.json')); print(next((c['value'] for c in d['cookies'] if c['name']=='accessToken'), ''))")
-          if [ -z "$ACCESS_TOKEN" ]; then echo "No accessToken"; exit 1; fi
-          echo "accessToken obtained"
-          curl -s https://api.repeatermock.com/auth/me -H "Cookie: accessToken=$ACCESS_TOKEN" | python -m json.tool
+          python repeatermock_login.py
 
       - name: Print run log
         if: always()
