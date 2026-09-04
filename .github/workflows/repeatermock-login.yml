@@ -20,8 +20,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright httpx
-          python -m playwright install chromium
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb || sudo apt-get install -f -y
+          rm /tmp/chrome.deb
+          pip install nodriver httpx
 
       - name: Run login script
         env:
@@ -29,8 +33,9 @@ jobs:
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
+          rm -rf /tmp/ts_profile
           mkdir -p output
-          python repeatermock_login.py
+          xvfb-run -a python repeatermock_login.py
 
       - name: Verify login
         if: always()

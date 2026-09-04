@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-RepeaterMock Login via Playwright + EzSolver-style Turnstile injection.
+RepeaterMock Login via nodriver (EzSolver approach) — GitHub Actions ready.
 
-Uses vanilla Playwright (not nodriver) because nodriver can't connect to
-Chrome on GitHub Actions. To bypass DisableDevtool (swiper.js), we block
-the swiper.js request entirely.
-
-The Turnstile widget is injected into the real page DOM and solved by
-clicking, just like EzSolver does with nodriver.
+Key fix: all page.evaluate() calls use IIFE syntax (() => { ... })() because
+nodriver evaluates the expression but does NOT auto-call arrow functions
+(unlike Playwright which does).
 """
 
 import asyncio
@@ -20,13 +17,15 @@ import warnings
 from pathlib import Path
 from datetime import datetime, timezone
 
+import nodriver as uc
 import httpx
-from playwright.async_api import async_playwright
 
 URL = "https://repeatermock.com/login"
 EMAIL = os.environ.get("RM_EMAIL", "spellingbeeanswers@gmail.com")
 PASSWORD = os.environ.get("RM_PASSWORD", "BloggingJi@7")
 SITEKEY = "0x4AAAAAADixxaKQ-LspbGkf"
+CHROME_PATH = os.environ.get("CHROME_PATH", "")
+PROFILE_DIR = os.environ.get("TS_PROFILE_DIR", "/tmp/ts_profile")
 OUT = Path(os.environ.get("OUTPUT_DIR", "./output"))
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -55,49 +54,66 @@ def section(title):
 
 
 async def main():
-    section("RepeaterMock Login via Playwright + EzSolver injection")
+    section("RepeaterMock Login via nodriver (EzSolver)")
     log(f"Email: {EMAIL}")
-    log(f"Output: {OUT}")
+    log(f"Chrome: {CHROME_PATH}")
 
-    async with async_playwright() as p:
-        section("STEP 1: Launch Chromium (headless, block swiper.js)")
-        browser = await p.chromium.launch(
-            channel="chromium",
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        ctx = await browser.new_context(
-            viewport={"width": 1366, "height": 900},
-            locale="en-US",
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
-        # Block swiper.js (contains DisableDevtool which hides the form)
-        await ctx.route("**/swiper.js", lambda route: route.abort())
-        log("✅ Browser launched, swiper.js blocked")
+    # Find Chrome
+    chrome = CHROME_PATH
+    if not chrome or not os.path.isfile(chrome):
+        for c in ["/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
+                  "/usr/bin/chromium-browser", "/usr/bin/chromium"]:
+            if os.path.isfile(c):
+                chrome = c
+                break
+    log(f"Using Chrome: {chrome}")
 
-        page = await ctx.new_page()
+    section("STEP 1: Launch nodriver browser")
+    browser = await uc.start(
+        browser_executable_path=chrome,
+        headless=False,
+        user_data_dir=PROFILE_DIR,
+        sandbox=False,
+        browser_args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ],
+    )
+    log("✅ Browser launched")
 
+    try:
         section("STEP 2: Navigate to login page")
-        log(f"URL: {URL}")
-        await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        page = await browser.get(URL)
+        log("Page requested, waiting 8s…")
+        await asyncio.sleep(8)
 
-        try:
-            await page.wait_for_selector("input[type=email]", timeout=15000)
-            log("✅ Login form is visible!")
-        except:
-            log("❌ Login form not visible", "ERROR")
-            html = await page.content()
-            log(f"Page HTML length: {len(html)}")
-            log(f"First 300 chars: {html[:300]}")
-            await browser.close()
+        # Use IIFE syntax: (() => { ... })()
+        page_info = await page.evaluate("""
+            (() => ({
+                url: window.location.href,
+                title: document.title,
+                bodyLen: document.body ? document.body.innerHTML.length : 0,
+                hasEmailInput: !!document.querySelector('input[type=email]'),
+                hasForm: !!document.querySelector('form'),
+            }))()
+        """)
+        log(f"Page info: {page_info}")
+
+        if not page_info:
+            log("❌ evaluate returned None", "ERROR")
             return
 
-        await page.wait_for_timeout(3000)
-        ts_type = await page.evaluate("() => typeof window.turnstile")
-        log(f"window.turnstile type: {ts_type}")
+        log(f"  URL: {page_info.get('url')}")
+        log(f"  Title: {page_info.get('title')}")
+        log(f"  Body length: {page_info.get('bodyLen')}")
+        log(f"  Has email input: {page_info.get('hasEmailInput')}")
+
+        if not page_info.get("hasEmailInput"):
+            log("❌ Login form not visible", "ERROR")
+            return
 
         section("STEP 3: Inject Turnstile widget (EzSolver style)")
         await page.evaluate(f"""
@@ -118,10 +134,10 @@ async def main():
                 s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=_tsLoad&render=explicit';
                 s.async = true;
                 document.head.appendChild(s);
-            }})();
+            }})()
         """)
-        log("Widget injected, waiting 5s for initialization…")
-        await page.wait_for_timeout(5000)
+        log("Widget injected, waiting 5s…")
+        await asyncio.sleep(5)
 
         section("STEP 4: Wait for Turnstile token")
         token = await page.evaluate("""
@@ -135,9 +151,8 @@ async def main():
         if token:
             log(f"✅ Auto-solved! Token (first 20): {token[:20]}…")
         else:
-            log("Not auto-solved. Waiting + clicking (up to 10 attempts)…")
-            for attempt in range(10):
-                # Check for token first (maybe it auto-solved)
+            log("Not auto-solved, clicking widget (up to 8 attempts)…")
+            for attempt in range(8):
                 token = await page.evaluate("""
                     (() => {
                         if (window._tsToken) return window._tsToken;
@@ -146,10 +161,9 @@ async def main():
                     })()
                 """)
                 if token:
-                    log(f"✅ Solved at attempt {attempt+1}! Token (first 20): {token[:20]}…")
+                    log(f"✅ Solved at attempt {attempt+1}!")
                     break
 
-                log(f"  Attempt {attempt+1}/10: clicking widget…")
                 rect = await page.evaluate("""
                     (() => {
                         for (const f of document.querySelectorAll('iframe')) {
@@ -165,47 +179,29 @@ async def main():
                 if rect:
                     cx = rect["x"] + 28 + random.uniform(-3, 3)
                     cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
-                    log(f"    iframe at ({cx:.0f}, {cy:.0f}) size={rect['w']:.0f}x{rect['h']:.0f}")
+                    log(f"  Attempt {attempt+1}: clicking iframe at ({cx:.0f}, {cy:.0f})")
                 else:
                     cx = 48 + random.uniform(-3, 3)
                     cy = 52 + random.uniform(-3, 3)
-                    log(f"    no iframe, fixed pos ({cx:.0f}, {cy:.0f})")
+                    log(f"  Attempt {attempt+1}: clicking fixed pos ({cx:.0f}, {cy:.0f})")
 
-                await page.mouse.move(cx - 80, cy - 20)
-                await page.wait_for_timeout(200)
-                await page.mouse.move(cx, cy)
-                await page.wait_for_timeout(100)
-                await page.mouse.click(cx, cy)
-                await page.wait_for_timeout(5000)  # wait 5s between attempts
-
-                # Check for errors in the widget
-                widget_state = await page.evaluate("""
-                    (() => {
-                        const box = document.getElementById('_ts_box');
-                        if (!box) return 'no box';
-                        const iframe = box.querySelector('iframe');
-                        const inp = box.querySelector('[name="cf-turnstile-response"]');
-                        return {
-                            hasIframe: !!iframe,
-                            iframeSrc: iframe ? iframe.src.slice(0, 80) : null,
-                            tokenValue: inp ? inp.value.slice(0, 20) : null,
-                            boxHTML: box.innerHTML.slice(0, 200),
-                        };
-                    })()
-                """)
-                log(f"    widget state: {widget_state}")
+                await page.mouse_move(cx - 80, cy - 20)
+                await asyncio.sleep(0.2)
+                await page.mouse_move(cx, cy)
+                await asyncio.sleep(0.1)
+                await page.mouse_click(cx, cy)
+                await asyncio.sleep(4)
 
         if not token:
-            log("❌ Failed to solve Turnstile after 5 attempts", "ERROR")
-            await browser.close()
+            log("❌ Failed to solve Turnstile", "ERROR")
             return
 
         log(f"Token length: {len(token)}")
 
         section("STEP 5: Get cookies + submit login")
-        cookies = await ctx.cookies()
-        cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-        log(f"Got {len(cookies)} cookies from browser")
+        browser_cookies = await browser.cookies.get_all()
+        cookie_str = "; ".join(f"{c.name}={c.value}" for c in browser_cookies)
+        log(f"Got {len(browser_cookies)} cookies")
 
         log("Calling POST /auth/login…")
         async with httpx.AsyncClient(timeout=30.0) as cli:
@@ -221,19 +217,14 @@ async def main():
                 },
             )
             api_status = r.status_code
-            try:
-                api_json = r.json()
-            except:
-                api_json = {"raw": r.text[:500]}
+            api_json = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text[:500]}
             set_cookies = r.headers.get_list("set-cookie") if hasattr(r.headers, "get_list") else []
 
         log(f"API status: {api_status}")
         log(f"API response: {json.dumps(api_json, ensure_ascii=False)[:400]}")
-        log(f"Set-Cookie headers: {len(set_cookies)}")
 
         if api_status != 200 or not api_json.get("success"):
-            log(f"❌ Login failed", "ERROR")
-            await browser.close()
+            log("❌ Login failed", "ERROR")
             return
 
         user = api_json.get("user", {})
@@ -245,14 +236,16 @@ async def main():
 
         # Build cookie list
         cookie_list = []
-        for c in cookies:
+        for c in browser_cookies:
+            ss = c.same_site if hasattr(c, "same_site") else "Lax"
+            if hasattr(ss, "value"): ss = ss.value
+            elif not isinstance(ss, str): ss = str(ss)
             cookie_list.append({
-                "name": c["name"], "value": c["value"],
-                "domain": c["domain"], "path": c.get("path", "/"),
-                "expires": c.get("expires", -1),
-                "httpOnly": c.get("httpOnly", False),
-                "secure": c.get("secure", False),
-                "sameSite": c.get("sameSite", "Lax"),
+                "name": c.name, "value": c.value, "domain": c.domain,
+                "path": c.path, "expires": c.expires if hasattr(c, "expires") else -1,
+                "httpOnly": c.http_only if hasattr(c, "http_only") else False,
+                "secure": c.secure if hasattr(c, "secure") else False,
+                "sameSite": ss,
             })
         for sc in set_cookies:
             parts = sc.split(";")[0].split("=", 1)
@@ -277,73 +270,65 @@ async def main():
                 f.write(f"{d}\t{'TRUE' if d.startswith('.') else 'FALSE'}\t{c.get('path','/')}\t"
                         f"{'TRUE' if c.get('secure') else 'FALSE'}\t{int(c.get('expires',0) or 0)}\t{c['name']}\t{c['value']}\n")
         access_token = auth_cookies.get("accessToken", "")
-        refresh_token = auth_cookies.get("refreshToken", "")
         with open(OUT / "auth_tokens.json", "w") as f:
-            json.dump({"accessToken": access_token, "refreshToken": refresh_token,
+            json.dump({"accessToken": access_token, "refreshToken": auth_cookies.get("refreshToken", ""),
                         "timestamp": datetime.now(timezone.utc).isoformat(), "email": EMAIL}, f, indent=2)
-        log(f"Saved cookies.json, cookies.txt, auth_tokens.json")
         log(f"accessToken (first 50): {access_token[:50]}…")
 
-        section("STEP 8: Browse 5-6 pages with session cookies")
+        section("STEP 8: Browse 5 pages with session cookies")
         browse_results = []
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
             for i, (name, page_url) in enumerate(BROWSE_PAGES, 1):
-                log("")
                 log(f"--- Page {i}/{len(BROWSE_PAGES)}: {name} ---")
-                log(f"  GET {page_url}")
                 try:
                     r = await cli.get(page_url, headers={
                         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                        "Cookie": cookie_header,
-                        "Referer": "https://repeatermock.com/",
+                        "Cookie": cookie_header, "Referer": "https://repeatermock.com/",
                     })
-                    status = r.status_code
                     body = r.text
-                    title = ""
-                    if "<title>" in body:
-                        title = body.split("<title>")[1].split("</title>")[0].strip()[:80]
-                    has_login = "Log in" in body
-                    has_email = EMAIL in body
-                    log(f"  Status: {status}")
-                    log(f"  Body: {len(body):,} bytes")
-                    log(f"  Title: {title}")
-                    log(f"  Has 'Log in' button: {has_login}")
-                    log(f"  Has user email: {has_email}")
-
+                    title = body.split("<title>")[1].split("</title>")[0].strip()[:60] if "<title>" in body else ""
                     me_r = await cli.get("https://api.repeatermock.com/auth/me", headers={"Cookie": cookie_header})
-                    try:
-                        me_j = me_r.json()
-                        me_ok = me_j.get("success", False)
-                    except:
-                        me_ok = False
-                    log(f"  /auth/me: {me_r.status_code} success={me_ok}")
-
-                    browse_results.append({"name": name, "url": page_url, "status": status,
-                                           "body_length": len(body), "title": title,
-                                           "auth_me_success": me_ok})
+                    me_ok = me_r.json().get("success", False) if me_r.headers.get("content-type","").startswith("application/json") else False
+                    log(f"  {name}: status={r.status_code} len={len(body):,} title='{title}' auth={me_ok}")
+                    browse_results.append({"name": name, "status": r.status_code, "len": len(body), "auth": me_ok})
                 except Exception as e:
-                    log(f"  ❌ Error: {e}", "ERROR")
-                    browse_results.append({"name": name, "url": page_url, "error": str(e)})
+                    log(f"  ❌ {name}: {e}", "ERROR")
 
         section("STEP 9: Summary")
         log(f"Login: ✅ SUCCESS")
         log(f"User:  {user.get('name')} ({user.get('email')})")
         log(f"Plan:  {user.get('plan')}")
-        log(f"Pages browsed: {len(browse_results)}/{len(BROWSE_PAGES)}")
-        auth_ok = sum(1 for r in browse_results if r.get("auth_me_success"))
-        log(f"/auth/me verified: {auth_ok}/{len(browse_results)}")
+        auth_ok = sum(1 for r in browse_results if r.get("auth"))
+        log(f"Pages: {len(browse_results)}/{len(BROWSE_PAGES)}  /auth/me verified: {auth_ok}")
         for r in browse_results:
             icon = "✅" if r.get("status") == 200 else "❌"
-            auth = "🔒" if r.get("auth_me_success") else "🔓"
-            log(f"  {icon} {auth} {r['name']:<15} status={r.get('status','ERR')} len={r.get('body_length',0):>7,}")
-
+            auth = "🔒" if r.get("auth") else "🔓"
+            log(f"  {icon} {auth} {r['name']:<15} status={r.get('status','ERR')} len={r.get('len',0):>7,}")
         log(f"\n🎉 ALL DONE!")
-        await browser.close()
+
+    finally:
+        browser.stop()
+
+
+def start_xvfb():
+    import platform, subprocess
+    if platform.system() != "Linux": return None
+    if os.environ.get("DISPLAY"): return None
+    log("Starting Xvfb…")
+    proc = subprocess.Popen(["Xvfb", ":99", "-screen", "0", "1280x900x24"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.environ["DISPLAY"] = ":99"
+    time.sleep(2)
+    return proc
 
 
 if __name__ == "__main__":
     section("RepeaterMock Login + Browse — GitHub Actions")
     log(f"Python: {sys.version.split()[0]}")
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        asyncio.run(main())
+    xvfb = start_xvfb()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            asyncio.run(main())
+    finally:
+        if xvfb: xvfb.terminate()
