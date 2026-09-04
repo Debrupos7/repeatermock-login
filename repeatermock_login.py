@@ -117,29 +117,41 @@ async def solve_and_login() -> dict:
         section("STEP 2: Navigate to the real login page")
         log(f"URL: {URL}")
         page = await browser.get(URL)
-        await asyncio.sleep(5)
-        log("✅ Page loaded")
+        log("Page requested, waiting for load…")
+        await asyncio.sleep(8)  # longer wait for GitHub Actions
 
-        # Debug: check page state
-        page_info = await page.evaluate("""
-            () => ({
-                url: window.location.href,
-                title: document.title,
-                bodyLen: document.body ? document.body.innerHTML.length : 0,
-                bodyText: document.body ? document.body.innerText.slice(0, 300) : "",
-                hasEmailInput: !!document.querySelector('input[type=email]'),
-                hasPasswordInput: !!document.querySelector('input[type=password]'),
-                hasForm: !!document.querySelector('form'),
-                scripts: Array.from(document.querySelectorAll('script[src]')).map(s => s.src).slice(0, 5),
-            })
-        """)
-        log(f"  URL: {page_info.get('url') if page_info else 'None'}")
-        log(f"  Title: {page_info.get('title') if page_info else 'None'}")
-        log(f"  Body length: {page_info.get('bodyLen') if page_info else 'None'}")
-        log(f"  Body text (first 200): {(page_info.get('bodyText') or '')[:200]}")
-        log(f"  Has email input: {page_info.get('hasEmailInput') if page_info else 'None'}")
-        log(f"  Has password input: {page_info.get('hasPasswordInput') if page_info else 'None'}")
-        log(f"  Has form: {page_info.get('hasForm') if page_info else 'None'}")
+        # Retry evaluate up to 3 times (CDP can be flaky on first call)
+        page_info = None
+        for attempt in range(3):
+            try:
+                page_info = await page.evaluate("""
+                    () => ({
+                        url: window.location.href,
+                        title: document.title,
+                        bodyLen: document.body ? document.body.innerHTML.length : 0,
+                        bodyText: document.body ? document.body.innerText.slice(0, 300) : "",
+                        hasEmailInput: !!document.querySelector('input[type=email]'),
+                        hasPasswordInput: !!document.querySelector('input[type=password]'),
+                        hasForm: !!document.querySelector('form'),
+                    })
+                """)
+                if page_info:
+                    break
+            except Exception as e:
+                log(f"  evaluate attempt {attempt+1} failed: {e}", "WARN")
+                await asyncio.sleep(2)
+
+        log("✅ Page loaded")
+        if page_info:
+            log(f"  URL: {page_info.get('url', '?')}")
+            log(f"  Title: {page_info.get('title', '?')}")
+            log(f"  Body length: {page_info.get('bodyLen', 0)}")
+            log(f"  Body text (first 200): {(page_info.get('bodyText') or '')[:200]}")
+            log(f"  Has email input: {page_info.get('hasEmailInput')}")
+            log(f"  Has password input: {page_info.get('hasPasswordInput')}")
+            log(f"  Has form: {page_info.get('hasForm')}")
+        else:
+            log("  ⚠️ page.evaluate returned None after 3 attempts", "WARN")
 
         # Save page HTML for debugging
         try:
