@@ -78,8 +78,10 @@ async def main():
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-software-rasterizer",
             "--no-first-run",
             "--no-default-browser-check",
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1",
         ],
     )
     log("✅ Browser launched")
