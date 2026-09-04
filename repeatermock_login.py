@@ -118,30 +118,40 @@ async def solve_and_login() -> dict:
         log(f"URL: {URL}")
         page = await browser.get(URL)
         log("Page requested, waiting for load…")
-        await asyncio.sleep(8)  # longer wait for GitHub Actions
+        await asyncio.sleep(8)
 
-        # Retry evaluate up to 3 times (CDP can be flaky on first call)
-        page_info = None
-        for attempt in range(3):
-            try:
-                page_info = await page.evaluate("""
-                    () => ({
-                        url: window.location.href,
-                        title: document.title,
-                        bodyLen: document.body ? document.body.innerHTML.length : 0,
-                        bodyText: document.body ? document.body.innerText.slice(0, 300) : "",
-                        hasEmailInput: !!document.querySelector('input[type=email]'),
-                        hasPasswordInput: !!document.querySelector('input[type=password]'),
-                        hasForm: !!document.querySelector('form'),
-                    })
-                """)
-                if page_info:
-                    break
-            except Exception as e:
-                log(f"  evaluate attempt {attempt+1} failed: {e}", "WARN")
-                await asyncio.sleep(2)
+        # Get the current page (it may have changed due to redirect)
+        try:
+            page = await browser.get(URL)
+            await asyncio.sleep(5)
+        except:
+            pass
+
+        # Get raw HTML instead of relying on evaluate
+        try:
+            html = await page.get_content()
+            log(f"Page HTML length: {len(html) if html else 0}")
+            log(f"Page HTML (first 500): {(html or '')[:500]}")
+            # Save for debugging
+            with open(OUT / "page_source.html", "w") as f:
+                f.write(html or "")
+            # Check for Cloudflare challenge indicators
+            is_cf_challenge = "challenge" in (html or "").lower() or "cf-please-wait" in (html or "").lower() or "just a moment" in (html or "").lower()
+            log(f"Is Cloudflare challenge page: {is_cf_challenge}")
+            has_form = 'input type="email"' in (html or "") or "input[type=email]" in (html or "")
+            log(f"Has email input in HTML: {has_form}")
+        except Exception as e:
+            log(f"Could not get page HTML: {e}", "ERROR")
+            html = ""
+            has_form = False
+            is_cf_challenge = False
 
         log("✅ Page loaded")
+
+        page_info = {
+            "hasEmailInput": has_form,
+            "isCFChallenge": is_cf_challenge,
+        }
         if page_info:
             log(f"  URL: {page_info.get('url', '?')}")
             log(f"  Title: {page_info.get('title', '?')}")
