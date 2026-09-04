@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-RepeaterMock Login + Test Page Scraper via NoCaptchaAI API.
+RepeaterMock Login + Test Page Scraper — Multi-provider Turnstile solver.
+
+Supports multiple CAPTCHA solving APIs (try whichever has a key set):
+1. NSLSolver  — 100 free, no card, simplest API (POST /solve, synchronous)
+2. NoCaptchaAI — 6000 free (if credits activated)
+3. CapSolver   — paid but reliable
 
 Flow:
-1. Solve Cloudflare Turnstile via NoCaptchaAI API (no browser needed)
+1. Solve Cloudflare Turnstile via whichever API key is available
 2. Login to RepeaterMock with email + password + solved token
-3. Use the session cookies to scrape the test page
+3. Use session cookies to scrape the test page
 4. Save everything (cookies, scraped questions, logs)
 """
 
@@ -20,8 +25,7 @@ from pathlib import Path
 
 import httpx
 
-NOCAPTCHA_API_KEY = os.environ.get("NOCAPTCHA_API_KEY", "")
-NOCAPTCHA_BASE = "https://api.nocaptchaai.com"
+# ─── Config ──────────────────────────────────────────────────────────────────
 LOGIN_URL = "https://repeatermock.com/login"
 LOGIN_API = "https://api.repeatermock.com/auth/login"
 ME_API = "https://api.repeatermock.com/auth/me"
@@ -30,6 +34,12 @@ PASSWORD = os.environ.get("RM_PASSWORD", "BloggingJi@7")
 SITEKEY = "0x4AAAAAADixxaKQ-LspbGkf"
 TEST_PAGE_URL = "https://repeatermock.com/tb/test-series/ssc-cgl/test/6a0f3ef35a73de9e21cdf098/instructions"
 TEST_ID = "6a0f3ef35a73de9e21cdf098"
+
+# CAPTCHA solver keys (set whichever you have)
+NSL_API_KEY = os.environ.get("NSL_API_KEY", "")
+NOCAPTCHA_API_KEY = os.environ.get("NOCAPTCHA_API_KEY", "")
+CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
+
 BROWSE_PAGES = [
     ("Dashboard", "https://repeatermock.com/dashboard"),
     ("Test Series", "https://repeatermock.com/test-series"),
@@ -53,14 +63,49 @@ def section(title):
     log(f"  {title}")
     log("=" * 70)
 
-async def solve_turnstile(cli):
-    section("STEP 1: Solve Cloudflare Turnstile via NoCaptchaAI")
-    log("Checking NoCaptchaAI balance…")
-    r = await cli.post(f"{NOCAPTCHA_BASE}/getBalance", json={"clientKey": NOCAPTCHA_API_KEY})
+# ─── Provider 1: NSLSolver (100 free, synchronous, simplest) ────────────────
+async def solve_with_nslsolver(cli):
+    log("Using NSLSolver (100 free requests, no card needed)")
+    log(f"  API Key: {NSL_API_KEY[:15]}…")
+    log(f"  POST https://api.nslsolver.com/solve")
+    log(f"  type=turnstile, site_key={SITEKEY}, url={LOGIN_URL}")
+
+    r = await cli.post("https://api.nslsolver.com/solve", json={
+        "type": "turnstile",
+        "site_key": SITEKEY,
+        "url": LOGIN_URL,
+    }, headers={
+        "Content-Type": "application/json",
+        "X-API-Key": NSL_API_KEY,
+    }, timeout=120.0)
+
+    data = r.json()
+    log(f"  Response: {json.dumps(data, ensure_ascii=False)[:300]}")
+
+    if data.get("token"):
+        token = data["token"]
+        log(f"  ✅ Token solved! Length: {len(token)}")
+        log(f"  Token (first 50): {token[:50]}…")
+        return token
+    elif data.get("error"):
+        log(f"  ❌ NSLSolver error: {data['error']}", "ERROR")
+        return None
+    else:
+        log(f"  ❌ Unexpected response: {data}", "ERROR")
+        return None
+
+# ─── Provider 2: NoCaptchaAI (6000 free if activated) ───────────────────────
+async def solve_with_nocaptcha(cli):
+    log("Using NoCaptchaAI")
+    log(f"  API Key: {NOCAPTCHA_API_KEY[:15]}…")
+
+    # Check balance
+    r = await cli.post("https://api.nocaptchaai.com/getBalance",
+                       json={"clientKey": NOCAPTCHA_API_KEY})
     log(f"  Balance: {json.dumps(r.json(), ensure_ascii=False)[:200]}")
 
-    log("Creating Turnstile task (AntiTurnstileTaskProxyLess)…")
-    r = await cli.post(f"{NOCAPTCHA_BASE}/createTask", json={
+    # Create task
+    r = await cli.post("https://api.nocaptchaai.com/createTask", json={
         "clientKey": NOCAPTCHA_API_KEY,
         "task": {
             "type": "AntiTurnstileTaskProxyLess",
@@ -69,33 +114,22 @@ async def solve_turnstile(cli):
         }
     })
     data = r.json()
-    log(f"  Response: {json.dumps(data, ensure_ascii=False)[:300]}")
+    log(f"  createTask: {json.dumps(data, ensure_ascii=False)[:300]}")
 
     if data.get("errorId", 0) != 0:
-        error = data.get("error", str(data))
-        log(f"  ❌ createTask failed: {error}", "ERROR")
-        if "Invalid apikey" in str(error):
-            log("", "ERROR")
-            log("  ╔══════════════════════════════════════════════════════╗", "ERROR")
-            log("  ║  API KEY INVALID — please check:                     ║", "ERROR")
-            log("  ║  1. Log into https://nocaptchaai.com dashboard       ║", "ERROR")
-            log("  ║  2. Verify your email address                        ║", "ERROR")
-            log("  ║  3. Copy the EXACT API key from Settings             ║", "ERROR")
-            log("  ║  4. Claim the free 6000 credits                      ║", "ERROR")
-            log("  ╚══════════════════════════════════════════════════════╝", "ERROR")
+        log(f"  ❌ NoCaptchaAI failed: {data.get('error', data)}", "ERROR")
         return None
 
     task_id = data.get("taskId")
     if not task_id:
-        log(f"  ❌ No taskId: {data}", "ERROR")
+        log(f"  ❌ No taskId", "ERROR")
         return None
-    log(f"  ✅ Task created: {task_id}")
 
-    log("Polling for token…")
+    log(f"  Task ID: {task_id}, polling…")
     start = time.time()
     for attempt in range(60):
         await asyncio.sleep(2)
-        r = await cli.post(f"{NOCAPTCHA_BASE}/getTaskResult", json={
+        r = await cli.post("https://api.nocaptchaai.com/getTaskResult", json={
             "clientKey": NOCAPTCHA_API_KEY, "taskId": task_id,
         })
         data = r.json()
@@ -104,16 +138,104 @@ async def solve_turnstile(cli):
         if status == "ready":
             token = data.get("solution", {}).get("token", "")
             log(f"  ✅ Token ready at {elapsed:.1f}s! Length: {len(token)}")
-            log(f"  Token (first 50): {token[:50]}…")
             return token
         elif status == "failed" or data.get("errorId", 0) != 0:
-            log(f"  ❌ Failed at {elapsed:.1f}s: {json.dumps(data)[:200]}", "ERROR")
+            log(f"  ❌ Failed: {json.dumps(data)[:200]}", "ERROR")
             return None
         if attempt % 5 == 0:
             log(f"  [{elapsed:.0f}s] status={status}…")
-    log("  ❌ Timed out (120s)", "ERROR")
+    log("  ❌ Timed out", "ERROR")
     return None
 
+# ─── Provider 3: CapSolver ───────────────────────────────────────────────────
+async def solve_with_capsolver(cli):
+    log("Using CapSolver")
+    log(f"  API Key: {CAPSOLVER_API_KEY[:15]}…")
+
+    r = await cli.post("https://api.capsolver.com/createTask", json={
+        "clientKey": CAPSOLVER_API_KEY,
+        "task": {
+            "type": "AntiTurnstileTaskProxyLess",
+            "websiteURL": LOGIN_URL,
+            "websiteKey": SITEKEY,
+        }
+    })
+    data = r.json()
+    log(f"  createTask: {json.dumps(data, ensure_ascii=False)[:300]}")
+
+    if data.get("errorId", 0) != 0:
+        log(f"  ❌ CapSolver failed: {data.get('errorDescription', data)}", "ERROR")
+        return None
+
+    task_id = data.get("taskId")
+    if not task_id:
+        log(f"  ❌ No taskId", "ERROR")
+        return None
+
+    log(f"  Task ID: {task_id}, polling…")
+    start = time.time()
+    for attempt in range(60):
+        await asyncio.sleep(3)
+        r = await cli.post("https://api.capsolver.com/getTaskResult", json={
+            "clientKey": CAPSOLVER_API_KEY, "taskId": task_id,
+        })
+        data = r.json()
+        status = data.get("status", "?")
+        elapsed = time.time() - start
+        if status == "ready":
+            token = data.get("solution", {}).get("token", "")
+            log(f"  ✅ Token ready at {elapsed:.1f}s! Length: {len(token)}")
+            return token
+        elif status == "failed" or data.get("errorId", 0) != 0:
+            log(f"  ❌ Failed: {json.dumps(data)[:200]}", "ERROR")
+            return None
+        if attempt % 5 == 0:
+            log(f"  [{elapsed:.0f}s] status={status}…")
+    log("  ❌ Timed out", "ERROR")
+    return None
+
+# ─── Solve Turnstile (tries each provider) ──────────────────────────────────
+async def solve_turnstile(cli):
+    section("STEP 1: Solve Cloudflare Turnstile")
+
+    providers = []
+    if NSL_API_KEY:
+        providers.append(("NSLSolver", solve_with_nslsolver))
+    if NOCAPTCHA_API_KEY:
+        providers.append(("NoCaptchaAI", solve_with_nocaptcha))
+    if CAPSOLVER_API_KEY:
+        providers.append(("CapSolver", solve_with_capsolver))
+
+    if not providers:
+        log("❌ No CAPTCHA solver API key set!", "ERROR")
+        log("", "ERROR")
+        log("Set at least ONE of these environment variables:", "ERROR")
+        log("  NSL_API_KEY        — Sign up at https://nslsolver.com (100 free, no card)", "ERROR")
+        log("  NOCAPTCHA_API_KEY  — Sign up at https://nocaptchaai.com (6000 free)", "ERROR")
+        log("  CAPSOLVER_API_KEY  — Sign up at https://capsolver.com", "ERROR")
+        return None
+
+    log(f"Available providers: {[p[0] for p in providers]}")
+    log(f"Site key: {SITEKEY}")
+    log(f"Login URL: {LOGIN_URL}")
+
+    for name, solver in providers:
+        log(f"\n--- Trying {name} ---")
+        try:
+            token = await solver(cli)
+            if token:
+                log(f"\n✅ Turnstile solved via {name}!")
+                return token
+            else:
+                log(f"{name} failed, trying next provider…", "WARN")
+        except Exception as e:
+            log(f"{name} error: {e}", "WARN")
+            continue
+
+    log("\n❌ All providers failed!", "ERROR")
+    return None
+
+# ─── Login ───────────────────────────────────────────────────────────────────
 async def login(cli, token):
     section("STEP 2: Login to RepeaterMock")
     log(f"POST {LOGIN_API}")
@@ -138,6 +260,7 @@ async def login(cli, token):
     log(f"  User: {user.get('name')}  Email: {user.get('email')}  Plan: {user.get('plan')}")
     return user, set_cookies
 
+# ─── Save cookies ────────────────────────────────────────────────────────────
 def save_cookies(set_cookies):
     section("STEP 3: Save cookies")
     cookie_list = []
@@ -151,8 +274,8 @@ def save_cookies(set_cookies):
                 if a.strip().lower().startswith("domain="):
                     domain = a.split("=", 1)[1].strip()
             cookie_list.append({
-                "name": name, "value": value, "domain": domain,
-                "path": "/", "httpOnly": any("httponly" in a.lower() for a in attrs),
+                "name": name, "value": value, "domain": domain, "path": "/",
+                "httpOnly": any("httponly" in a.lower() for a in attrs),
                 "secure": any("secure" in a.lower() for a in attrs), "sameSite": "Lax",
             })
     with open(OUTPUT_DIR / "cookies.json", "w") as f:
@@ -172,6 +295,7 @@ def save_cookies(set_cookies):
         log(f"    - {c['name']}={c['value'][:50]}…")
     return "; ".join(f"{c['name']}={c['value']}" for c in cookie_list)
 
+# ─── Browse + scrape ─────────────────────────────────────────────────────────
 async def browse_and_scrape(cli, cookie_header):
     section("STEP 4: Browse pages + scrape test page")
     results = []
@@ -179,8 +303,7 @@ async def browse_and_scrape(cli, cookie_header):
         log(f"\n--- {name}: {url} ---")
         try:
             r = await cli.get(url, headers={
-                "User-Agent": UA, "Cookie": cookie_header,
-                "Referer": "https://repeatermock.com/",
+                "User-Agent": UA, "Cookie": cookie_header, "Referer": "https://repeatermock.com/",
             }, follow_redirects=True)
             title = r.text.split("<title>")[1].split("</title>")[0].strip()[:80] if "<title>" in r.text else ""
             log(f"  Status: {r.status_code}  Body: {len(r.text):,} bytes  Title: {title}")
@@ -191,7 +314,7 @@ async def browse_and_scrape(cli, cookie_header):
             results.append({"name": name, "url": url, "status": r.status_code, "length": len(r.text), "title": title, "auth_verified": me_ok})
 
             if "instructions" in url:
-                log(f"  ✅ This is the test page — saving full HTML!")
+                log(f"  ✅ Test page — saving full HTML!")
                 with open(OUTPUT_DIR / "test_page.html", "w", encoding="utf-8") as f:
                     f.write(r.text)
                 log(f"  Saved: test_page.html ({len(r.text):,} bytes)")
@@ -205,61 +328,50 @@ async def browse_and_scrape(cli, cookie_header):
                         with open(OUTPUT_DIR / "next_data.json", "w") as f:
                             json.dump(next_data, f, indent=2, ensure_ascii=False)
                         log(f"  Saved: next_data.json")
-                    except: log(f"  Could not parse __NEXT_DATA__")
+                    except: pass
 
-                # Try the API endpoint for questions
-                api_url = f"https://api.repeatermock.com/api/tests/{TEST_ID}"
-                log(f"  Trying API: {api_url}")
-                api_r = await cli.get(api_url, headers={"Cookie": cookie_header, "User-Agent": UA, "Referer": url})
-                log(f"  API status: {api_r.status_code}")
-                if api_r.status_code == 200:
-                    try:
-                        api_data = api_r.json()
-                        with open(OUTPUT_DIR / "test_api_response.json", "w") as f:
-                            json.dump(api_data, f, indent=2, ensure_ascii=False)
-                        log(f"  Saved: test_api_response.json")
-                        api_str = json.dumps(api_data)
-                        if "question" in api_str.lower():
-                            log(f"  ✅ API response contains questions!")
-                    except: log(f"  API returned non-JSON")
-
-                # Also try /api/v1/test-series/{TEST_ID}
-                for path in [f"/api/v1/test-series/{TEST_ID}", f"/api/tests/{TEST_ID}/answers",
-                             f"/api/v1/test-series/{TEST_ID}/sections", f"/api/v1/tests/{TEST_ID}"]:
-                    api_url2 = f"https://api.repeatermock.com{path}"
-                    log(f"  Trying: {api_url2}")
-                    api_r2 = await cli.get(api_url2, headers={"Cookie": cookie_header, "User-Agent": UA})
-                    if api_r2.status_code == 200:
+                # Try API endpoints for questions
+                for path in [f"/api/tests/{TEST_ID}", f"/api/tests/{TEST_ID}/answers",
+                             f"/api/v1/test-series/{TEST_ID}", f"/api/v1/tests/{TEST_ID}"]:
+                    api_url = f"https://api.repeatermock.com{path}"
+                    log(f"  Trying: {api_url}")
+                    api_r = await cli.get(api_url, headers={"Cookie": cookie_header, "User-Agent": UA})
+                    if api_r.status_code == 200:
                         try:
-                            d = api_r2.json()
-                            with open(OUTPUT_DIR / f"api_{path.replace('/','_')}.json", "w") as f:
+                            d = api_r.json()
+                            fname = f"api_{path.replace('/','_')}.json"
+                            with open(OUTPUT_DIR / fname, "w") as f:
                                 json.dump(d, f, indent=2, ensure_ascii=False)
-                            log(f"    ✅ 200 OK — saved! ({len(json.dumps(d)):,} bytes)")
+                            log(f"    ✅ 200 OK — saved {fname} ({len(json.dumps(d)):,} bytes)")
+                            if "question" in json.dumps(d).lower():
+                                log(f"    🔥 Contains questions!")
                         except: pass
                     else:
-                        log(f"    {api_r2.status_code}")
-
+                        log(f"    {api_r.status_code}")
         except Exception as e:
             log(f"  ❌ Error: {e}", "ERROR")
-            results.append({"name": name, "url": url, "error": str(e)})
     return results
 
+# ─── Main ────────────────────────────────────────────────────────────────────
 async def main():
-    section("RepeaterMock Login + Test Page Scraper (NoCaptchaAI)")
+    section("RepeaterMock Login + Test Page Scraper (Multi-provider)")
     log(f"Python: {sys.version.split()[0]}")
     log(f"Email: {EMAIL}")
-    log(f"Key: {NOCAPTCHA_API_KEY[:15]}…" if NOCAPTCHA_API_KEY else "Key: NOT SET")
     log(f"Test page: {TEST_PAGE_URL}")
-    if not NOCAPTCHA_API_KEY:
-        log("❌ NOCAPTCHA_API_KEY not set!", "ERROR")
+    log(f"Providers: NSL={'✅' if NSL_API_KEY else '❌'} NoCaptcha={'✅' if NOCAPTCHA_API_KEY else '❌'} CapSolver={'✅' if CAPSOLVER_API_KEY else '❌'}")
+
+    if not any([NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY]):
+        log("❌ No API key set! Set one of: NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY", "ERROR")
         return
-    async with httpx.AsyncClient(timeout=60.0) as cli:
+
+    async with httpx.AsyncClient(timeout=120.0) as cli:
         token = await solve_turnstile(cli)
         if not token: return
         user, set_cookies = await login(cli, token)
         if not user: return
         cookie_header = save_cookies(set_cookies)
         browse_results = await browse_and_scrape(cli, cookie_header)
+
         section("FINAL SUMMARY")
         log(f"Login: ✅ SUCCESS")
         log(f"User:  {user.get('name')} ({user.get('email')})")

@@ -23,7 +23,9 @@ jobs:
 
       - name: Run login + scrape script
         env:
+          NSL_API_KEY: ${{ secrets.NSL_API_KEY }}
           NOCAPTCHA_API_KEY: ${{ secrets.NOCAPTCHA_API_KEY }}
+          CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
           OUTPUT_DIR: ${{ github.workspace }}/output
