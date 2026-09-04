@@ -39,6 +39,7 @@ TEST_ID = "6a0f3ef35a73de9e21cdf098"
 NSL_API_KEY = os.environ.get("NSL_API_KEY", "")
 NOCAPTCHA_API_KEY = os.environ.get("NOCAPTCHA_API_KEY", "")
 CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
+SCRAPFLY_API_KEY = os.environ.get("SCRAPFLY_API_KEY", "")
 
 BROWSE_PAGES = [
     ("Dashboard", "https://repeatermock.com/dashboard"),
@@ -194,11 +195,76 @@ async def solve_with_capsolver(cli):
     log("  ❌ Timed out", "ERROR")
     return None
 
+# ─── Provider 0: Scrapfly (1000 free credits, renders page + extracts token) ─
+async def solve_with_scrapfly(cli):
+    log("Using Scrapfly (1000 free credits, renders page to extract token)")
+    log(f"  API Key: {SCRAPFLY_API_KEY[:15]}…")
+    log(f"  Render login page with JS + anti-bot bypass, wait 15s for Turnstile to solve")
+
+    # Scrapfly renders the page with their residential IPs + stealth browser
+    # The Turnstile widget should solve automatically, populating the hidden input
+    scrape_url = (
+        f"https://api.scrapfly.io/scrape"
+        f"?key={SCRAPFLY_API_KEY}"
+        f"&url={httpx.URL(LOGIN_URL)}"
+        f"&render_js=true"
+        f"&asp=true"  # anti-scraping protection bypass
+        f"&rendering_wait=15000"  # wait 15s for Turnstile to solve
+    )
+
+    r = await cli.get(scrape_url, timeout=60.0)
+    data = r.json()
+
+    if data.get("error"):
+        log(f"  ❌ Scrapfly error: {data['error']}", "ERROR")
+        return None
+
+    # Check if the page was rendered successfully
+    result = data.get("result", {})
+    status_code = result.get("status_code", "?")
+    content = result.get("content", "")
+    log(f"  Scrapfly status: {status_code}, content length: {len(content):,}")
+
+    # Save the rendered page for debugging
+    with open(OUTPUT_DIR / "scrapfly_rendered.html", "w", encoding="utf-8") as f:
+        f.write(content)
+    log(f"  Saved rendered page: scrapfly_rendered.html")
+
+    # Extract the Turnstile token from the hidden input
+    import re
+    token_match = re.search(
+        r'name="cf-turnstile-response"[^>]*value="([^"]+)"',
+        content
+    )
+    if not token_match:
+        # Try alternate pattern (value before name)
+        token_match = re.search(
+            r'value="([^"]+)"[^>]*name="cf-turnstile-response"',
+            content
+        )
+
+    if token_match and len(token_match.group(1)) > 20:
+        token = token_match.group(1)
+        log(f"  ✅ Token found in rendered page! Length: {len(token)}")
+        log(f"  Token (first 50): {token[:50]}…")
+        return token
+    else:
+        log(f"  ❌ No Turnstile token found in rendered HTML", "ERROR")
+        log(f"  Checking if Turnstile widget loaded…", "WARN")
+        if "cf-turnstile" in content:
+            log(f"  Widget div found but token not populated (may need more wait time)", "WARN")
+        if "DEVTOOL" in content:
+            log(f"  DisableDevtool detected in page", "WARN")
+        return None
+
+
 # ─── Solve Turnstile (tries each provider) ──────────────────────────────────
 async def solve_turnstile(cli):
     section("STEP 1: Solve Cloudflare Turnstile")
 
     providers = []
+    if SCRAPFLY_API_KEY:
+        providers.append(("Scrapfly", solve_with_scrapfly))
     if NSL_API_KEY:
         providers.append(("NSLSolver", solve_with_nslsolver))
     if NOCAPTCHA_API_KEY:
@@ -210,6 +276,7 @@ async def solve_turnstile(cli):
         log("❌ No CAPTCHA solver API key set!", "ERROR")
         log("", "ERROR")
         log("Set at least ONE of these environment variables:", "ERROR")
+        log("  SCRAPFLY_API_KEY   — Sign up at https://scrapfly.io (1000 free, no card, best option!)", "ERROR")
         log("  NSL_API_KEY        — Sign up at https://nslsolver.com (100 free, no card)", "ERROR")
         log("  NOCAPTCHA_API_KEY  — Sign up at https://nocaptchaai.com (6000 free)", "ERROR")
         log("  CAPSOLVER_API_KEY  — Sign up at https://capsolver.com", "ERROR")
@@ -358,9 +425,9 @@ async def main():
     log(f"Python: {sys.version.split()[0]}")
     log(f"Email: {EMAIL}")
     log(f"Test page: {TEST_PAGE_URL}")
-    log(f"Providers: NSL={'✅' if NSL_API_KEY else '❌'} NoCaptcha={'✅' if NOCAPTCHA_API_KEY else '❌'} CapSolver={'✅' if CAPSOLVER_API_KEY else '❌'}")
+    log(f"Providers: Scrapfly={'✅' if SCRAPFLY_API_KEY else '❌'} NSL={'✅' if NSL_API_KEY else '❌'} NoCaptcha={'✅' if NOCAPTCHA_API_KEY else '❌'} CapSolver={'✅' if CAPSOLVER_API_KEY else '❌'}")
 
-    if not any([NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY]):
+    if not any([SCRAPFLY_API_KEY, NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY]):
         log("❌ No API key set! Set one of: NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY", "ERROR")
         return
 
