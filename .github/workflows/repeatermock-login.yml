@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: "Install system dependencies"
         run: |
           set -e
           sudo apt-get update
@@ -27,29 +27,11 @@ jobs:
           sudo apt-get install -y /tmp/chrome.deb || sudo apt-get install -f -y
           rm /tmp/chrome.deb
           google-chrome-stable --version
-          # Check Chrome's shared lib dependencies
-          echo "=== Chrome dependency check ==="
-          ldd $(which google-chrome-stable) 2>&1 | grep "not found" || echo "All deps OK"
 
-      - name: Install Python dependencies
+      - name: "Install Python dependencies"
         run: pip install nodriver httpx
 
-      - name: Pre-flight: test Chrome can launch
-        run: |
-          echo "=== Testing Chrome launch ==="
-          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
-          sleep 2
-          export DISPLAY=:99
-          # Try launching Chrome with --no-sandbox and dump DOM
-          timeout 10 google-chrome-stable \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --disable-gpu \
-            --headless=new \
-            --dump-dom about:blank 2>&1 | tail -5
-          echo "Chrome test exit: $?"
-
-      - name: Run login + browse script
+      - name: "Run login + browse script"
         env:
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
@@ -62,33 +44,32 @@ jobs:
           sleep 2
           export DISPLAY=:99
           echo "DISPLAY=$DISPLAY"
-          python repeatermock_login.py 2>&1 || true
+          python repeatermock_login.py
           EXIT_CODE=$?
           kill $XVFB_PID 2>/dev/null || true
-          cat output/run_log.txt 2>/dev/null
           exit $EXIT_CODE
 
-      - name: Verify login
+      - name: "Verify login"
         if: always()
         run: |
           if [ ! -f output/cookies.json ]; then
-            echo "❌ No cookies.json"
+            echo "No cookies.json"
             exit 1
           fi
           ACCESS_TOKEN=$(python -c "import json; d=json.load(open('output/cookies.json')); print(next((c['value'] for c in d['cookies'] if c['name']=='accessToken'), ''))")
           if [ -z "$ACCESS_TOKEN" ]; then
-            echo "❌ No accessToken"
+            echo "No accessToken"
             exit 1
           fi
-          echo "✅ accessToken obtained"
+          echo "accessToken obtained"
           curl -s https://api.repeatermock.com/auth/me \
             -H "Cookie: accessToken=$ACCESS_TOKEN" | python -m json.tool
 
-      - name: Print run log
+      - name: "Print run log"
         if: always()
         run: cat output/run_log.txt 2>/dev/null || echo "(no log)"
 
-      - name: Upload artifacts
+      - name: "Upload artifacts"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -96,6 +77,6 @@ jobs:
           path: output/
           retention-days: 7
 
-      - name: Clean up
+      - name: "Clean up"
         if: always()
         run: rm -rf output/ /tmp/ts_profile
