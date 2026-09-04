@@ -24,9 +24,8 @@ jobs:
           sudo apt-get install -y xvfb
           pip install nodriver httpx playwright
           python -m playwright install chromium
-          # Find Chrome for Testing binary
           CHROME_BIN=$(find /home/runner/.cache/ms-playwright -name "chrome" -path "*/chrome-linux64/*" | head -1)
-          echo "Chrome for Testing: $CHROME_BIN"
+          echo "Chrome: $CHROME_BIN"
           "$CHROME_BIN" --version
           echo "CHROME_PATH=$CHROME_BIN" >> $GITHUB_ENV
 
@@ -39,7 +38,18 @@ jobs:
         run: |
           rm -rf /tmp/ts_profile
           mkdir -p output
-          xvfb-run -a python repeatermock_login.py
+          # Start Xvfb on a FIXED display (not xvfb-run -a which uses random displays)
+          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
+          XVFB_PID=$!
+          sleep 2
+          export DISPLAY=:99
+          # Verify Xvfb is running
+          ps -p $XVFB_PID > /dev/null && echo "Xvfb running on :99" || echo "Xvfb FAILED"
+          # Run the script (with retry)
+          python repeatermock_login.py || python repeatermock_login.py || python repeatermock_login.py
+          EXIT_CODE=$?
+          kill $XVFB_PID 2>/dev/null || true
+          exit $EXIT_CODE
 
       - name: Verify login
         if: always()
