@@ -21,17 +21,14 @@ jobs:
       - name: Install system dependencies (Xvfb + Chrome)
         run: |
           set -e
-          echo "::group::apt-get update"
           sudo apt-get update
-          echo "::endgroup::"
-          echo "::group::Install xvfb + Google Chrome"
           sudo apt-get install -y xvfb
           wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
           sudo apt-get install -y /tmp/chrome.deb || sudo apt-get install -f -y
           rm /tmp/chrome.deb
-          echo "::endgroup::"
           echo "Chrome version:"
           google-chrome-stable --version
+          echo "Whoami: $(whoami)"
 
       - name: Install Python dependencies
         run: pip install nodriver httpx
@@ -44,7 +41,20 @@ jobs:
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
           mkdir -p output
-          xvfb-run -a python repeatermock_login.py
+          # Start Xvfb manually for better control
+          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
+          XVFB_PID=$!
+          sleep 2
+          export DISPLAY=:99
+          echo "DISPLAY=$DISPLAY"
+          echo "Xvfb running: $(ps -p $XVFB_PID > /dev/null && echo yes || echo no)"
+          # Run the script
+          python repeatermock_login.py || true
+          EXIT_CODE=$?
+          # Kill Xvfb
+          kill $XVFB_PID 2>/dev/null || true
+          echo "Script exit code: $EXIT_CODE"
+          exit $EXIT_CODE
 
       - name: Verify login
         if: always()
