@@ -88,18 +88,15 @@ async def solve_and_login() -> dict:
         headless=False,  # needs Xvfb on servers
         user_data_dir=PROFILE_DIR,
         sandbox=False,
+        user_agent=(
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1"
+        ),
         browser_args=[
-            "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-software-rasterizer",
             "--no-first-run",
             "--no-default-browser-check",
-            # UA includes "Googlebot" to bypass DisableDevtool (swiper.js)
-            # which hides the form when it detects automation.
-            # The Chrome version is kept real so Cloudflare Turnstile still solves.
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1",
         ],
     )
     log("✅ Browser launched")
