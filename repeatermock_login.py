@@ -88,10 +88,6 @@ async def solve_and_login() -> dict:
         headless=False,  # needs Xvfb on servers
         user_data_dir=PROFILE_DIR,
         sandbox=False,
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1"
-        ),
         browser_args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
@@ -101,6 +97,21 @@ async def solve_and_login() -> dict:
         ],
     )
     log("✅ Browser launched")
+
+    # Set a Googlebot-ish UA via CDP to bypass DisableDevtool (swiper.js).
+    # We can't use nodriver's user_agent param (it breaks Chrome on some systems).
+    # The UA includes "Googlebot" which makes DisableDevtool skip its checks.
+    try:
+        page_temp = await browser.get("about:blank")
+        await page_temp.send(
+            uc.cdp.network.set_user_agent_override(
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1"
+            )
+        )
+        log("✅ Set Googlebot UA via CDP")
+    except Exception as e:
+        log(f"⚠️ Could not set UA via CDP: {e}", "WARN")
 
     try:
         section("STEP 2: Navigate to the real login page")
