@@ -20,33 +20,32 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          set -e
           sudo apt-get update
           sudo apt-get install -y xvfb
-          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get install -y /tmp/chrome.deb || sudo apt-get install -f -y
-          rm /tmp/chrome.deb
-          google-chrome-stable --version
+          # Install Chrome for Testing via Playwright (same as our local setup)
+          pip install playwright
+          python -m playwright install chromium
+          # Find the Chrome for Testing binary
+          CHROME_BIN=$(find /home/runner/.cache/ms-playwright -name "chrome" -path "*/chrome-linux64/*" | head -1)
+          echo "Chrome for Testing: $CHROME_BIN"
+          "$CHROME_BIN" --version
+          echo "CHROME_PATH=$CHROME_BIN" >> $GITHUB_ENV
 
       - name: Install Python dependencies
         run: pip install nodriver httpx
 
-      - name: Debug - test Chrome + nodriver
+      - name: Debug - test nodriver with Chrome for Testing
         run: |
           Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
           sleep 2
           export DISPLAY=:99
-          echo "Test 1: Chrome headless"
-          timeout 10 google-chrome-stable --no-sandbox --disable-dev-shm-usage --headless --dump-dom about:blank 2>&1 | tail -3
-          echo ""
-          echo "Test 2: nodriver minimal"
           python test_chrome.py 2>&1 || echo "nodriver test failed"
 
       - name: Run login script
         env:
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
-          CHROME_PATH: /usr/bin/google-chrome-stable
+          CHROME_PATH: ${{ env.CHROME_PATH }}
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
           rm -rf /tmp/ts_profile
