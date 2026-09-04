@@ -8,7 +8,7 @@ on:
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -18,46 +18,19 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb
-          # Install Chrome for Testing via Playwright (same as our local setup)
-          pip install playwright
+          pip install playwright httpx
           python -m playwright install chromium
-          # Find the Chrome for Testing binary
-          CHROME_BIN=$(find /home/runner/.cache/ms-playwright -name "chrome" -path "*/chrome-linux64/*" | head -1)
-          echo "Chrome for Testing: $CHROME_BIN"
-          "$CHROME_BIN" --version
-          echo "CHROME_PATH=$CHROME_BIN" >> $GITHUB_ENV
-
-      - name: Install Python dependencies
-        run: pip install nodriver httpx
-
-      - name: Debug - test nodriver with Chrome for Testing
-        run: |
-          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
-          sleep 2
-          export DISPLAY=:99
-          python test_chrome.py 2>&1 || echo "nodriver test failed"
 
       - name: Run login script
         env:
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
-          CHROME_PATH: ${{ env.CHROME_PATH }}
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
-          rm -rf /tmp/ts_profile
           mkdir -p output
-          Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
-          XVFB_PID=$!
-          sleep 2
-          export DISPLAY=:99
           python repeatermock_login.py
-          EXIT_CODE=$?
-          kill $XVFB_PID 2>/dev/null || true
-          exit $EXIT_CODE
 
       - name: Verify login
         if: always()
@@ -79,7 +52,3 @@ jobs:
           name: repeatermock-output
           path: output/
           retention-days: 7
-
-      - name: Clean up
-        if: always()
-        run: rm -rf output/ /tmp/ts_profile
