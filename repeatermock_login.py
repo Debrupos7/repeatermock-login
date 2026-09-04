@@ -53,6 +53,40 @@ def section(title):
     log("=" * 70)
 
 
+def parse_eval(result):
+    """Parse nodriver's CDP evaluate return format.
+    Returns can be:
+    - Primitive: returned as-is
+    - Object: list of [key, {type, value}] pairs → convert to dict
+    - None: returned as-is
+    """
+    if result is None:
+        return None
+    if isinstance(result, (str, int, float, bool)):
+        return result
+    if isinstance(result, list):
+        # Could be a list of [key, RemoteObject] pairs (object)
+        # or a list of values (array)
+        if len(result) > 0 and isinstance(result[0], list) and len(result[0]) == 2:
+            # Object: [[key, {type, value}], ...]
+            d = {}
+            for item in result:
+                if isinstance(item, list) and len(item) == 2:
+                    key, val = item
+                    if isinstance(val, dict) and 'value' in val:
+                        d[key] = val['value']
+                    else:
+                        d[key] = parse_eval(val)
+            return d
+        # Array: [RemoteObject, ...]
+        return [parse_eval(item) if isinstance(item, dict) and 'value' in item else parse_eval(item) for item in result]
+    if isinstance(result, dict):
+        if 'value' in result and 'type' in result:
+            return result['value']
+        return {k: parse_eval(v) for k, v in result.items()}
+    return result
+
+
 async def main():
     section("RepeaterMock Login via nodriver (EzSolver)")
     log(f"Email: {EMAIL}")
@@ -93,7 +127,7 @@ async def main():
         await asyncio.sleep(8)
 
         # Use IIFE syntax: (() => { ... })()
-        page_info = await page.evaluate("""
+        raw_result = await page.evaluate("""
             (() => ({
                 url: window.location.href,
                 title: document.title,
@@ -102,6 +136,7 @@ async def main():
                 hasForm: !!document.querySelector('form'),
             }))()
         """)
+        page_info = parse_eval(raw_result)
         log(f"Page info: {page_info}")
 
         if not page_info:
@@ -142,31 +177,31 @@ async def main():
         await asyncio.sleep(5)
 
         section("STEP 4: Wait for Turnstile token")
-        token = await page.evaluate("""
+        token = parse_eval(await page.evaluate("""
             (() => {
                 if (window._tsToken) return window._tsToken;
                 const inp = document.querySelector('#_ts_box [name="cf-turnstile-response"]');
                 return (inp && inp.value) ? inp.value : null;
             })()
-        """)
+        """))
 
         if token:
             log(f"✅ Auto-solved! Token (first 20): {token[:20]}…")
         else:
             log("Not auto-solved, clicking widget (up to 8 attempts)…")
             for attempt in range(8):
-                token = await page.evaluate("""
+                token = parse_eval(await page.evaluate("""
                     (() => {
                         if (window._tsToken) return window._tsToken;
                         const inp = document.querySelector('#_ts_box [name="cf-turnstile-response"]');
                         return (inp && inp.value) ? inp.value : null;
                     })()
-                """)
+                """))
                 if token:
                     log(f"✅ Solved at attempt {attempt+1}!")
                     break
 
-                rect = await page.evaluate("""
+                rect = parse_eval(await page.evaluate("""
                     (() => {
                         for (const f of document.querySelectorAll('iframe')) {
                             const src = f.src || '';
@@ -177,7 +212,7 @@ async def main():
                         }
                         return null;
                     })()
-                """)
+                """))
                 if rect:
                     cx = rect["x"] + 28 + random.uniform(-3, 3)
                     cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
