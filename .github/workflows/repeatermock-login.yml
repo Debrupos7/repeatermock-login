@@ -1,0 +1,70 @@
+name: RepeaterMock Login + Browse
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          npx @puppeteer/browsers install chrome@stable
+
+      - name: Install Python dependencies
+        run: |
+          pip install nodriver httpx
+
+      - name: Run login + browse script
+        env:
+          RM_EMAIL: ${{ secrets.RM_EMAIL }}
+          RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
+          CHROME_PATH: ${{ github.workspace }}/chrome-linux/chrome
+          OUTPUT_DIR: ${{ github.workspace }}/output
+        run: |
+          mkdir -p output
+          xvfb-run -a python repeatermock_login.py
+
+      - name: Verify login
+        run: |
+          ACCESS_TOKEN=$(python -c "import json; d=json.load(open('output/cookies.json')); print(next((c['value'] for c in d['cookies'] if c['name']=='accessToken'), ''))")
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "❌ No accessToken found — login failed"
+            exit 1
+          fi
+          echo "✅ accessToken obtained"
+          curl -s https://api.repeatermock.com/auth/me \
+            -H "Cookie: accessToken=$ACCESS_TOKEN" | python -m json.tool
+
+      - name: Upload cookies as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repeatermock-cookies
+          path: output/
+          retention-days: 7
+
+      - name: Upload log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log
+          path: output/run_log.txt
+          retention-days: 7
+
+      - name: Clean up
+        if: always()
+        run: rm -rf output/ /tmp/ts_profile
