@@ -87,10 +87,14 @@ async def solve_and_login() -> dict:
         browser_executable_path=CHROME_PATH,
         headless=False,  # needs Xvfb on servers
         user_data_dir=PROFILE_DIR,
-        sandbox=False,   # required when running as root (GitHub Actions)
+        sandbox=False,
         browser_args=[
+            "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--no-first-run",
+            "--no-default-browser-check",
         ],
     )
     log("✅ Browser launched")
