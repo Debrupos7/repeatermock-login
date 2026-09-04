@@ -8,7 +8,7 @@ on:
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -18,36 +18,56 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Xvfb + Chrome)
         run: |
+          set -e
+          echo "::group::apt-get update"
           sudo apt-get update
+          echo "::endgroup::"
+          echo "::group::Install xvfb + Google Chrome"
           sudo apt-get install -y xvfb
-          npx @puppeteer/browsers install chrome@stable
+          wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/chrome.deb || sudo apt-get install -f -y
+          rm /tmp/chrome.deb
+          echo "::endgroup::"
+          echo "Chrome version:"
+          google-chrome-stable --version
 
       - name: Install Python dependencies
-        run: |
-          pip install nodriver httpx
+        run: pip install nodriver httpx
 
       - name: Run login + browse script
         env:
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
-          CHROME_PATH: ${{ github.workspace }}/chrome-linux/chrome
+          CHROME_PATH: /usr/bin/google-chrome-stable
           OUTPUT_DIR: ${{ github.workspace }}/output
         run: |
           mkdir -p output
           xvfb-run -a python repeatermock_login.py
 
       - name: Verify login
+        if: always()
         run: |
+          if [ ! -f output/cookies.json ]; then
+            echo "❌ No cookies.json — login did not produce output"
+            exit 1
+          fi
           ACCESS_TOKEN=$(python -c "import json; d=json.load(open('output/cookies.json')); print(next((c['value'] for c in d['cookies'] if c['name']=='accessToken'), ''))")
           if [ -z "$ACCESS_TOKEN" ]; then
             echo "❌ No accessToken found — login failed"
             exit 1
           fi
           echo "✅ accessToken obtained"
+          echo "Verifying with /auth/me…"
           curl -s https://api.repeatermock.com/auth/me \
             -H "Cookie: accessToken=$ACCESS_TOKEN" | python -m json.tool
+
+      - name: Print run log
+        if: always()
+        run: |
+          echo "=== Full run log ==="
+          cat output/run_log.txt 2>/dev/null || echo "(no log file)"
 
       - name: Upload cookies as artifact
         if: always()

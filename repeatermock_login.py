@@ -87,6 +87,12 @@ async def solve_and_login() -> dict:
         browser_executable_path=CHROME_PATH,
         headless=False,  # needs Xvfb on servers
         user_data_dir=PROFILE_DIR,
+        browser_args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+        ],
     )
     log("✅ Browser launched")
 
