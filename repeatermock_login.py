@@ -95,6 +95,11 @@ async def solve_and_login() -> dict:
             "--disable-software-rasterizer",
             "--no-first-run",
             "--no-default-browser-check",
+            # UA includes "Googlebot" to bypass DisableDevtool (swiper.js)
+            # which hides the form when it detects automation.
+            # The Chrome version is kept real so Cloudflare Turnstile still solves.
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1",
         ],
     )
     log("✅ Browser launched")
@@ -103,17 +108,51 @@ async def solve_and_login() -> dict:
         section("STEP 2: Navigate to the real login page")
         log(f"URL: {URL}")
         page = await browser.get(URL)
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
         log("✅ Page loaded")
 
-        # Verify the form is visible
-        form_visible = await page.evaluate(
-            "() => !!document.querySelector('input[type=email]')"
-        )
-        log(f"Form visible: {form_visible}")
+        # Debug: check page state
+        page_info = await page.evaluate("""
+            () => ({
+                url: window.location.href,
+                title: document.title,
+                bodyLen: document.body ? document.body.innerHTML.length : 0,
+                bodyText: document.body ? document.body.innerText.slice(0, 300) : "",
+                hasEmailInput: !!document.querySelector('input[type=email]'),
+                hasPasswordInput: !!document.querySelector('input[type=password]'),
+                hasForm: !!document.querySelector('form'),
+                scripts: Array.from(document.querySelectorAll('script[src]')).map(s => s.src).slice(0, 5),
+            })
+        """)
+        log(f"  URL: {page_info.get('url') if page_info else 'None'}")
+        log(f"  Title: {page_info.get('title') if page_info else 'None'}")
+        log(f"  Body length: {page_info.get('bodyLen') if page_info else 'None'}")
+        log(f"  Body text (first 200): {(page_info.get('bodyText') or '')[:200]}")
+        log(f"  Has email input: {page_info.get('hasEmailInput') if page_info else 'None'}")
+        log(f"  Has password input: {page_info.get('hasPasswordInput') if page_info else 'None'}")
+        log(f"  Has form: {page_info.get('hasForm') if page_info else 'None'}")
+
+        # Save page HTML for debugging
+        try:
+            html = await page.evaluate("() => document.documentElement.outerHTML")
+            with open(OUT / "page_debug.html", "w") as f:
+                f.write(html or "")
+            log(f"  Saved HTML to page_debug.html")
+        except Exception as e:
+            log(f"  Could not save HTML: {e}")
+
+        form_visible = page_info.get('hasEmailInput') if page_info else False
         if not form_visible:
             log("❌ Form not visible — page may have detected automation", "ERROR")
-            return {"success": False, "error": "form not visible"}
+            # Try waiting longer and rechecking
+            log("  Waiting 10s and rechecking…")
+            await asyncio.sleep(10)
+            form_visible = await page.evaluate(
+                "() => !!document.querySelector('input[type=email]')"
+            )
+            log(f"  Form visible after 10s: {form_visible}")
+            if not form_visible:
+                return {"success": False, "error": "form not visible"}
 
         section("STEP 3: Inject Turnstile widget into the real page")
         await page.evaluate(f"""
