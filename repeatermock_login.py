@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 """
-RepeaterMock Login + Test Page Scraper — Multi-provider Turnstile solver.
+RepeaterMock Login + Test Page Scraper via ScrapingBee API.
 
-Supports multiple CAPTCHA solving APIs (try whichever has a key set):
-1. NSLSolver  — 100 free, no card, simplest API (POST /solve, synchronous)
-2. NoCaptchaAI — 6000 free (if credits activated)
-3. CapSolver   — paid but reliable
+ScrapingBee renders the login page with stealth proxy → Turnstile solves
+naturally → we extract the token → submit login → get cookies → scrape.
 
-Flow:
-1. Solve Cloudflare Turnstile via whichever API key is available
-2. Login to RepeaterMock with email + password + solved token
-3. Use session cookies to scrape the test page
-4. Save everything (cookies, scraped questions, logs)
+1000 free credits, no credit card, works from any IP (datacenter included).
 """
 
 import asyncio
@@ -25,27 +19,14 @@ from pathlib import Path
 
 import httpx
 
-# ─── Config ──────────────────────────────────────────────────────────────────
+SCRAPINGBEE_API_KEY = os.environ.get("SCRAPINGBEE_API_KEY", "")
 LOGIN_URL = "https://repeatermock.com/login"
 LOGIN_API = "https://api.repeatermock.com/auth/login"
 ME_API = "https://api.repeatermock.com/auth/me"
 EMAIL = os.environ.get("RM_EMAIL", "spellingbeeanswers@gmail.com")
 PASSWORD = os.environ.get("RM_PASSWORD", "BloggingJi@7")
-SITEKEY = "0x4AAAAAADixxaKQ-LspbGkf"
 TEST_PAGE_URL = "https://repeatermock.com/tb/test-series/ssc-cgl/test/6a0f3ef35a73de9e21cdf098/instructions"
 TEST_ID = "6a0f3ef35a73de9e21cdf098"
-
-# CAPTCHA solver keys (set whichever you have)
-NSL_API_KEY = os.environ.get("NSL_API_KEY", "")
-NOCAPTCHA_API_KEY = os.environ.get("NOCAPTCHA_API_KEY", "")
-CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
-SCRAPFLY_API_KEY = os.environ.get("SCRAPFLY_API_KEY", "")
-
-BROWSE_PAGES = [
-    ("Dashboard", "https://repeatermock.com/dashboard"),
-    ("Test Series", "https://repeatermock.com/test-series"),
-    ("Test Instructions", TEST_PAGE_URL),
-]
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "./output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = OUTPUT_DIR / "run_log.txt"
@@ -55,254 +36,43 @@ def log(msg, level="INFO"):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     line = f"[{ts}] [{level}] {msg}"
     print(line, flush=True)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    with open(LOG_FILE, "a") as f: f.write(line + "\n")
 
-def section(title):
-    log("")
-    log("=" * 70)
-    log(f"  {title}")
-    log("=" * 70)
+def section(t):
+    log(""); log("="*70); log(f"  {t}"); log("="*70)
 
-# ─── Provider 1: NSLSolver (100 free, synchronous, simplest) ────────────────
-async def solve_with_nslsolver(cli):
-    log("Using NSLSolver (100 free requests, no card needed)")
-    log(f"  API Key: {NSL_API_KEY[:15]}…")
-    log(f"  POST https://api.nslsolver.com/solve")
-    log(f"  type=turnstile, site_key={SITEKEY}, url={LOGIN_URL}")
-
-    r = await cli.post("https://api.nslsolver.com/solve", json={
-        "type": "turnstile",
-        "site_key": SITEKEY,
-        "url": LOGIN_URL,
-    }, headers={
-        "Content-Type": "application/json",
-        "X-API-Key": NSL_API_KEY,
-    }, timeout=120.0)
-
-    data = r.json()
-    log(f"  Response: {json.dumps(data, ensure_ascii=False)[:300]}")
-
-    if data.get("token"):
-        token = data["token"]
-        log(f"  ✅ Token solved! Length: {len(token)}")
-        log(f"  Token (first 50): {token[:50]}…")
-        return token
-    elif data.get("error"):
-        log(f"  ❌ NSLSolver error: {data['error']}", "ERROR")
-        return None
-    else:
-        log(f"  ❌ Unexpected response: {data}", "ERROR")
-        return None
-
-# ─── Provider 2: NoCaptchaAI (6000 free if activated) ───────────────────────
-async def solve_with_nocaptcha(cli):
-    log("Using NoCaptchaAI")
-    log(f"  API Key: {NOCAPTCHA_API_KEY[:15]}…")
-
-    # Check balance
-    r = await cli.post("https://api.nocaptchaai.com/getBalance",
-                       json={"clientKey": NOCAPTCHA_API_KEY})
-    log(f"  Balance: {json.dumps(r.json(), ensure_ascii=False)[:200]}")
-
-    # Create task
-    r = await cli.post("https://api.nocaptchaai.com/createTask", json={
-        "clientKey": NOCAPTCHA_API_KEY,
-        "task": {
-            "type": "AntiTurnstileTaskProxyLess",
-            "websiteURL": LOGIN_URL,
-            "websiteKey": SITEKEY,
-        }
-    })
-    data = r.json()
-    log(f"  createTask: {json.dumps(data, ensure_ascii=False)[:300]}")
-
-    if data.get("errorId", 0) != 0:
-        log(f"  ❌ NoCaptchaAI failed: {data.get('error', data)}", "ERROR")
-        return None
-
-    task_id = data.get("taskId")
-    if not task_id:
-        log(f"  ❌ No taskId", "ERROR")
-        return None
-
-    log(f"  Task ID: {task_id}, polling…")
-    start = time.time()
-    for attempt in range(60):
-        await asyncio.sleep(2)
-        r = await cli.post("https://api.nocaptchaai.com/getTaskResult", json={
-            "clientKey": NOCAPTCHA_API_KEY, "taskId": task_id,
-        })
-        data = r.json()
-        status = data.get("status", "?")
-        elapsed = time.time() - start
-        if status == "ready":
-            token = data.get("solution", {}).get("token", "")
-            log(f"  ✅ Token ready at {elapsed:.1f}s! Length: {len(token)}")
-            return token
-        elif status == "failed" or data.get("errorId", 0) != 0:
-            log(f"  ❌ Failed: {json.dumps(data)[:200]}", "ERROR")
-            return None
-        if attempt % 5 == 0:
-            log(f"  [{elapsed:.0f}s] status={status}…")
-    log("  ❌ Timed out", "ERROR")
-    return None
-
-# ─── Provider 3: CapSolver ───────────────────────────────────────────────────
-async def solve_with_capsolver(cli):
-    log("Using CapSolver")
-    log(f"  API Key: {CAPSOLVER_API_KEY[:15]}…")
-
-    r = await cli.post("https://api.capsolver.com/createTask", json={
-        "clientKey": CAPSOLVER_API_KEY,
-        "task": {
-            "type": "AntiTurnstileTaskProxyLess",
-            "websiteURL": LOGIN_URL,
-            "websiteKey": SITEKEY,
-        }
-    })
-    data = r.json()
-    log(f"  createTask: {json.dumps(data, ensure_ascii=False)[:300]}")
-
-    if data.get("errorId", 0) != 0:
-        log(f"  ❌ CapSolver failed: {data.get('errorDescription', data)}", "ERROR")
-        return None
-
-    task_id = data.get("taskId")
-    if not task_id:
-        log(f"  ❌ No taskId", "ERROR")
-        return None
-
-    log(f"  Task ID: {task_id}, polling…")
-    start = time.time()
-    for attempt in range(60):
-        await asyncio.sleep(3)
-        r = await cli.post("https://api.capsolver.com/getTaskResult", json={
-            "clientKey": CAPSOLVER_API_KEY, "taskId": task_id,
-        })
-        data = r.json()
-        status = data.get("status", "?")
-        elapsed = time.time() - start
-        if status == "ready":
-            token = data.get("solution", {}).get("token", "")
-            log(f"  ✅ Token ready at {elapsed:.1f}s! Length: {len(token)}")
-            return token
-        elif status == "failed" or data.get("errorId", 0) != 0:
-            log(f"  ❌ Failed: {json.dumps(data)[:200]}", "ERROR")
-            return None
-        if attempt % 5 == 0:
-            log(f"  [{elapsed:.0f}s] status={status}…")
-    log("  ❌ Timed out", "ERROR")
-    return None
-
-# ─── Provider 0: Scrapfly (1000 free credits, renders page + extracts token) ─
-async def solve_with_scrapfly(cli):
-    log("Using Scrapfly (1000 free credits, renders page to extract token)")
-    log(f"  API Key: {SCRAPFLY_API_KEY[:15]}…")
-    log(f"  Render login page with JS + anti-bot bypass, wait 15s for Turnstile to solve")
-
-    # Scrapfly renders the page with their residential IPs + stealth browser
-    # The Turnstile widget should solve automatically, populating the hidden input
-    scrape_url = (
-        f"https://api.scrapfly.io/scrape"
-        f"?key={SCRAPFLY_API_KEY}"
-        f"&url={httpx.URL(LOGIN_URL)}"
-        f"&render_js=true"
-        f"&asp=true"  # anti-scraping protection bypass
-        f"&rendering_wait=15000"  # wait 15s for Turnstile to solve
-    )
-
-    r = await cli.get(scrape_url, timeout=60.0)
-    data = r.json()
-
-    if data.get("error"):
-        log(f"  ❌ Scrapfly error: {data['error']}", "ERROR")
-        return None
-
-    # Check if the page was rendered successfully
-    result = data.get("result", {})
-    status_code = result.get("status_code", "?")
-    content = result.get("content", "")
-    log(f"  Scrapfly status: {status_code}, content length: {len(content):,}")
-
-    # Save the rendered page for debugging
-    with open(OUTPUT_DIR / "scrapfly_rendered.html", "w", encoding="utf-8") as f:
-        f.write(content)
-    log(f"  Saved rendered page: scrapfly_rendered.html")
-
-    # Extract the Turnstile token from the hidden input
-    import re
-    token_match = re.search(
-        r'name="cf-turnstile-response"[^>]*value="([^"]+)"',
-        content
-    )
-    if not token_match:
-        # Try alternate pattern (value before name)
-        token_match = re.search(
-            r'value="([^"]+)"[^>]*name="cf-turnstile-response"',
-            content
-        )
-
-    if token_match and len(token_match.group(1)) > 20:
-        token = token_match.group(1)
-        log(f"  ✅ Token found in rendered page! Length: {len(token)}")
-        log(f"  Token (first 50): {token[:50]}…")
-        return token
-    else:
-        log(f"  ❌ No Turnstile token found in rendered HTML", "ERROR")
-        log(f"  Checking if Turnstile widget loaded…", "WARN")
-        if "cf-turnstile" in content:
-            log(f"  Widget div found but token not populated (may need more wait time)", "WARN")
-        if "DEVTOOL" in content:
-            log(f"  DisableDevtool detected in page", "WARN")
-        return None
-
-
-# ─── Solve Turnstile (tries each provider) ──────────────────────────────────
 async def solve_turnstile(cli):
-    section("STEP 1: Solve Cloudflare Turnstile")
-
-    providers = []
-    if SCRAPFLY_API_KEY:
-        providers.append(("Scrapfly", solve_with_scrapfly))
-    if NSL_API_KEY:
-        providers.append(("NSLSolver", solve_with_nslsolver))
-    if NOCAPTCHA_API_KEY:
-        providers.append(("NoCaptchaAI", solve_with_nocaptcha))
-    if CAPSOLVER_API_KEY:
-        providers.append(("CapSolver", solve_with_capsolver))
-
-    if not providers:
-        log("❌ No CAPTCHA solver API key set!", "ERROR")
-        log("", "ERROR")
-        log("Set at least ONE of these environment variables:", "ERROR")
-        log("  SCRAPFLY_API_KEY   — Sign up at https://scrapfly.io (1000 free, no card, best option!)", "ERROR")
-        log("  NSL_API_KEY        — Sign up at https://nslsolver.com (100 free, no card)", "ERROR")
-        log("  NOCAPTCHA_API_KEY  — Sign up at https://nocaptchaai.com (6000 free)", "ERROR")
-        log("  CAPSOLVER_API_KEY  — Sign up at https://capsolver.com", "ERROR")
-        return None
-
-    log(f"Available providers: {[p[0] for p in providers]}")
-    log(f"Site key: {SITEKEY}")
-    log(f"Login URL: {LOGIN_URL}")
-
-    for name, solver in providers:
-        log(f"\n--- Trying {name} ---")
-        try:
-            token = await solver(cli)
-            if token:
-                log(f"\n✅ Turnstile solved via {name}!")
+    section("STEP 1: Solve Turnstile via ScrapingBee (stealth proxy)")
+    log(f"API Key: {SCRAPINGBEE_API_KEY[:15]}…")
+    
+    for attempt in range(5):
+        log(f"\n--- Attempt {attempt+1}/5 ---")
+        params = {
+            "api_key": SCRAPINGBEE_API_KEY,
+            "url": LOGIN_URL,
+            "render_js": "true",
+            "wait": "20",
+            "stealth_proxy": "true",
+        }
+        r = await cli.get("https://app.scrapingbee.com/api/v1/", params=params, timeout=180.0)
+        content = r.text
+        log(f"  Page rendered: {len(content):,} bytes")
+        
+        for pattern in [r'name="cf-turnstile-response"[^>]*value="([^"]+)"',
+                        r'value="([^"]+)"[^>]*name="cf-turnstile-response"']:
+            m = re.search(pattern, content)
+            if m and len(m.group(1)) > 20:
+                token = m.group(1)
+                log(f"  ✅ Token found! Length: {len(token)}")
                 return token
-            else:
-                log(f"{name} failed, trying next provider…", "WARN")
-        except Exception as e:
-            log(f"{name} error: {e}", "WARN")
-            continue
-
-    log("\n❌ All providers failed!", "ERROR")
+        
+        log(f"  ❌ No token (iframe loaded but didn't solve)")
+        if attempt < 4:
+            log(f"  Retrying in 3s…")
+            await asyncio.sleep(3)
+    
     return None
 
-# ─── Login ───────────────────────────────────────────────────────────────────
 async def login(cli, token):
     section("STEP 2: Login to RepeaterMock")
     log(f"POST {LOGIN_API}")
@@ -313,7 +83,7 @@ async def login(cli, token):
         "Origin": "https://repeatermock.com",
         "Referer": "https://repeatermock.com/login",
         "User-Agent": UA,
-    })
+    }, timeout=30.0)
     log(f"  Status: {r.status_code}")
     try: data = r.json()
     except: data = {"raw": r.text[:500]}
@@ -327,132 +97,120 @@ async def login(cli, token):
     log(f"  User: {user.get('name')}  Email: {user.get('email')}  Plan: {user.get('plan')}")
     return user, set_cookies
 
-# ─── Save cookies ────────────────────────────────────────────────────────────
-def save_cookies(set_cookies):
+def save_cookies(set_cookies, user):
     section("STEP 3: Save cookies")
     cookie_list = []
     for sc in set_cookies:
         parts = sc.split(";")[0].split("=", 1)
         if len(parts) == 2:
-            name, value = parts[0].strip(), parts[1].strip()
-            attrs = sc.split(";")[1:]
-            domain = ".repeatermock.com"
-            for a in attrs:
-                if a.strip().lower().startswith("domain="):
-                    domain = a.split("=", 1)[1].strip()
-            cookie_list.append({
-                "name": name, "value": value, "domain": domain, "path": "/",
-                "httpOnly": any("httponly" in a.lower() for a in attrs),
-                "secure": any("secure" in a.lower() for a in attrs), "sameSite": "Lax",
-            })
+            cookie_list.append({"name": parts[0].strip(), "value": parts[1].strip(),
+                                "domain": ".repeatermock.com", "path": "/"})
     with open(OUTPUT_DIR / "cookies.json", "w") as f:
-        json.dump({"cookies": cookie_list, "timestamp": datetime.now(timezone.utc).isoformat(), "email": EMAIL}, f, indent=2)
+        json.dump({"cookies": cookie_list, "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "email": EMAIL, "user": user}, f, indent=2)
     with open(OUTPUT_DIR / "cookies.txt", "w") as f:
         f.write("# Netscape HTTP Cookie File\n")
         for c in cookie_list:
-            d = c["domain"]
-            f.write(f"{d}\t{'TRUE' if d.startswith('.') else 'FALSE'}\t/\t{'TRUE' if c['secure'] else 'FALSE'}\t0\t{c['name']}\t{c['value']}\n")
+            f.write(f".repeatermock.com\tTRUE\t/\tTRUE\t0\t{c['name']}\t{c['value']}\n")
     access_token = next((c["value"] for c in cookie_list if c["name"] == "accessToken"), "")
-    refresh_token = next((c["value"] for c in cookie_list if c["name"] == "refreshToken"), "")
     with open(OUTPUT_DIR / "auth_tokens.json", "w") as f:
-        json.dump({"accessToken": access_token, "refreshToken": refresh_token,
-                    "timestamp": datetime.now(timezone.utc).isoformat(), "email": EMAIL}, f, indent=2)
+        json.dump({"accessToken": access_token, "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "email": EMAIL}, f, indent=2)
     log(f"  Saved {len(cookie_list)} cookies")
-    for c in cookie_list:
-        log(f"    - {c['name']}={c['value'][:50]}…")
+    for c in cookie_list: log(f"    - {c['name']}={c['value'][:50]}…")
     return "; ".join(f"{c['name']}={c['value']}" for c in cookie_list)
 
-# ─── Browse + scrape ─────────────────────────────────────────────────────────
-async def browse_and_scrape(cli, cookie_header):
-    section("STEP 4: Browse pages + scrape test page")
-    results = []
-    for name, url in BROWSE_PAGES:
-        log(f"\n--- {name}: {url} ---")
+async def scrape_test_page(cli, cookie_header):
+    section("STEP 4: Scrape test page")
+    log(f"URL: {TEST_PAGE_URL}")
+    r = await cli.get(TEST_PAGE_URL, headers={
+        "Cookie": cookie_header, "User-Agent": UA, "Referer": "https://repeatermock.com/",
+    }, timeout=30.0, follow_redirects=True)
+    html = r.text
+    log(f"  Status: {r.status_code}  Size: {len(html):,} bytes")
+    log(f"  Has 'Log in' button: {'Log in' in html}")
+    log(f"  Has 'question': {'question' in html.lower()}")
+    
+    with open(OUTPUT_DIR / "test_page.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    log(f"  Saved: test_page.html")
+    
+    # Extract __NEXT_DATA__
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m:
         try:
-            r = await cli.get(url, headers={
-                "User-Agent": UA, "Cookie": cookie_header, "Referer": "https://repeatermock.com/",
-            }, follow_redirects=True)
-            title = r.text.split("<title>")[1].split("</title>")[0].strip()[:80] if "<title>" in r.text else ""
-            log(f"  Status: {r.status_code}  Body: {len(r.text):,} bytes  Title: {title}")
-            me_r = await cli.get(ME_API, headers={"Cookie": cookie_header})
-            try: me_ok = me_r.json().get("success", False)
-            except: me_ok = False
-            log(f"  /auth/me: {me_r.status_code} success={me_ok}")
-            results.append({"name": name, "url": url, "status": r.status_code, "length": len(r.text), "title": title, "auth_verified": me_ok})
-
-            if "instructions" in url:
-                log(f"  ✅ Test page — saving full HTML!")
-                with open(OUTPUT_DIR / "test_page.html", "w", encoding="utf-8") as f:
-                    f.write(r.text)
-                log(f"  Saved: test_page.html ({len(r.text):,} bytes)")
-
-                # Extract __NEXT_DATA__
-                next_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', r.text, re.DOTALL)
-                if next_match:
-                    log(f"  Found __NEXT_DATA__ — parsing…")
-                    try:
-                        next_data = json.loads(next_match.group(1))
-                        with open(OUTPUT_DIR / "next_data.json", "w") as f:
-                            json.dump(next_data, f, indent=2, ensure_ascii=False)
-                        log(f"  Saved: next_data.json")
-                    except: pass
-
-                # Try API endpoints for questions
-                for path in [f"/api/tests/{TEST_ID}", f"/api/tests/{TEST_ID}/answers",
-                             f"/api/v1/test-series/{TEST_ID}", f"/api/v1/tests/{TEST_ID}"]:
-                    api_url = f"https://api.repeatermock.com{path}"
-                    log(f"  Trying: {api_url}")
-                    api_r = await cli.get(api_url, headers={"Cookie": cookie_header, "User-Agent": UA})
-                    if api_r.status_code == 200:
-                        try:
-                            d = api_r.json()
-                            fname = f"api_{path.replace('/','_')}.json"
-                            with open(OUTPUT_DIR / fname, "w") as f:
-                                json.dump(d, f, indent=2, ensure_ascii=False)
-                            log(f"    ✅ 200 OK — saved {fname} ({len(json.dumps(d)):,} bytes)")
-                            if "question" in json.dumps(d).lower():
-                                log(f"    🔥 Contains questions!")
-                        except: pass
-                    else:
-                        log(f"    {api_r.status_code}")
+            data = json.loads(m.group(1))
+            with open(OUTPUT_DIR / "next_data.json", "w") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            log(f"  Saved: next_data.json")
+            props = data.get("props", {}).get("pageProps", {})
+            log(f"  Page props: {list(props.keys())}")
+        except: pass
+    
+    # Try API endpoints
+    log(f"\n  Trying API endpoints…")
+    for path in [f"/api/tests/{TEST_ID}", f"/api/tests/{TEST_ID}/answers",
+                 f"/api/v1/test-series/{TEST_ID}", f"/api/v1/tests/{TEST_ID}"]:
+        url = f"https://api.repeatermock.com{path}"
+        try:
+            r = await cli.get(url, headers={"Cookie": cookie_header, "User-Agent": UA}, timeout=15.0)
+            if r.status_code == 200:
+                body = r.text
+                log(f"    ✅ {path}: {r.status_code} ({len(body)} bytes)")
+                with open(OUTPUT_DIR / f"api_{path.replace('/','_')}.json", "w") as f:
+                    f.write(body)
+                if "question" in body.lower():
+                    log(f"    🔥 Contains questions!")
+            else:
+                log(f"    {path}: {r.status_code}")
         except Exception as e:
-            log(f"  ❌ Error: {e}", "ERROR")
-    return results
+            log(f"    {path}: {e}")
+    
+    # Also browse other pages
+    log(f"\n  Browsing other pages…")
+    for name, url in [("Dashboard", "https://repeatermock.com/dashboard"),
+                       ("Test Series", "https://repeatermock.com/test-series")]:
+        try:
+            r = await cli.get(url, headers={"Cookie": cookie_header, "User-Agent": UA}, timeout=15.0)
+            log(f"    {name}: {r.status_code} ({len(r.text):,} bytes)")
+        except: pass
 
-# ─── Main ────────────────────────────────────────────────────────────────────
 async def main():
-    section("RepeaterMock Login + Test Page Scraper (Multi-provider)")
+    section("RepeaterMock Login + Scrape (ScrapingBee)")
     log(f"Python: {sys.version.split()[0]}")
     log(f"Email: {EMAIL}")
-    log(f"Test page: {TEST_PAGE_URL}")
-    log(f"Providers: Scrapfly={'✅' if SCRAPFLY_API_KEY else '❌'} NSL={'✅' if NSL_API_KEY else '❌'} NoCaptcha={'✅' if NOCAPTCHA_API_KEY else '❌'} CapSolver={'✅' if CAPSOLVER_API_KEY else '❌'}")
-
-    if not any([SCRAPFLY_API_KEY, NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY]):
-        log("❌ No API key set! Set one of: NSL_API_KEY, NOCAPTCHA_API_KEY, CAPSOLVER_API_KEY", "ERROR")
+    log(f"Key: {SCRAPINGBEE_API_KEY[:15]}…" if SCRAPINGBEE_API_KEY else "Key: NOT SET")
+    if not SCRAPINGBEE_API_KEY:
+        log("❌ SCRAPINGBEE_API_KEY not set!", "ERROR")
         return
-
-    async with httpx.AsyncClient(timeout=120.0) as cli:
+    
+    async with httpx.AsyncClient(timeout=180.0) as cli:
         token = await solve_turnstile(cli)
-        if not token: return
+        if not token:
+            log("❌ Failed to solve Turnstile after 5 attempts", "ERROR")
+            return
+        
         user, set_cookies = await login(cli, token)
         if not user: return
-        cookie_header = save_cookies(set_cookies)
-        browse_results = await browse_and_scrape(cli, cookie_header)
-
+        
+        cookie_header = save_cookies(set_cookies, user)
+        
+        # Verify auth
+        log(f"\nVerifying auth…")
+        me_r = await cli.get(ME_API, headers={"Cookie": cookie_header, "User-Agent": UA}, timeout=15.0)
+        me_ok = me_r.json().get("success", False)
+        log(f"  Auth verified: {me_ok}")
+        
+        await scrape_test_page(cli, cookie_header)
+        
         section("FINAL SUMMARY")
         log(f"Login: ✅ SUCCESS")
         log(f"User:  {user.get('name')} ({user.get('email')})")
         log(f"Plan:  {user.get('plan')}")
-        auth_ok = sum(1 for r in browse_results if r.get("auth_verified"))
-        log(f"Pages browsed: {len(browse_results)}  Auth verified: {auth_ok}/{len(browse_results)}")
-        for r in browse_results:
-            icon = "✅" if r.get("status") == 200 else "❌"
-            auth = "🔒" if r.get("auth_verified") else "🔓"
-            log(f"  {icon} {auth} {r['name']:<20} status={r.get('status','ERR')} len={r.get('length',0):>7,}")
+        log(f"Auth:  {'✅' if me_ok else '❌'}")
         log(f"\nFiles saved:")
         for f in sorted(OUTPUT_DIR.iterdir()):
-            if f.is_file():
-                log(f"  {f.name} ({f.stat().st_size:,} bytes)")
+            if f.is_file(): log(f"  {f.name} ({f.stat().st_size:,} bytes)")
         log(f"\n🎉 ALL DONE!")
 
 if __name__ == "__main__":
