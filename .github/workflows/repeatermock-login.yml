@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: "Install system dependencies"
+      - name: Install system dependencies
         run: |
           set -e
           sudo apt-get update
@@ -28,44 +28,21 @@ jobs:
           rm /tmp/chrome.deb
           google-chrome-stable --version
 
-      - name: "Install Python dependencies"
+      - name: Install Python dependencies
         run: pip install nodriver httpx
 
-      - name: "Debug: test Chrome launches"
+      - name: Debug - test Chrome + nodriver
         run: |
-          echo "=== Test 1: Chrome headless ==="
-          timeout 10 google-chrome-stable --no-sandbox --disable-dev-shm-usage --headless --dump-dom about:blank 2>&1 | tail -5
-          echo "Exit: $?"
-          
-          echo ""
-          echo "=== Test 2: Chrome headed under Xvfb ==="
           Xvfb :99 -screen 0 1280x900x24 -ac -nolisten unix &
           sleep 2
           export DISPLAY=:99
-          timeout 10 google-chrome-stable --no-sandbox --disable-dev-shm-usage --disable-gpu --dump-dom about:blank 2>&1 | tail -5
-          echo "Exit: $?"
-          
+          echo "Test 1: Chrome headless"
+          timeout 10 google-chrome-stable --no-sandbox --disable-dev-shm-usage --headless --dump-dom about:blank 2>&1 | tail -3
           echo ""
-          echo "=== Test 3: Minimal nodriver ==="
-          python3 -c "
-import asyncio, nodriver as uc
-async def test():
-    browser = await uc.start(
-        browser_executable_path='/usr/bin/google-chrome-stable',
-        headless=False,
-        sandbox=False,
-        browser_args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    )
-    page = await browser.get('about:blank')
-    await asyncio.sleep(2)
-    title = await page.evaluate('document.title')
-    print(f'Page title: {title}')
-    browser.stop()
-asyncio.run(test())
-" 2>&1 | tail -10
-          echo "Nodriver exit: $?"
+          echo "Test 2: nodriver minimal"
+          python test_chrome.py 2>&1 || echo "nodriver test failed"
 
-      - name: "Run login + browse script"
+      - name: Run login script
         env:
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
@@ -83,7 +60,7 @@ asyncio.run(test())
           kill $XVFB_PID 2>/dev/null || true
           exit $EXIT_CODE
 
-      - name: "Verify login"
+      - name: Verify login
         if: always()
         run: |
           if [ ! -f output/cookies.json ]; then echo "No cookies.json"; exit 1; fi
@@ -92,11 +69,11 @@ asyncio.run(test())
           echo "accessToken obtained"
           curl -s https://api.repeatermock.com/auth/me -H "Cookie: accessToken=$ACCESS_TOKEN" | python -m json.tool
 
-      - name: "Print run log"
+      - name: Print run log
         if: always()
         run: cat output/run_log.txt 2>/dev/null || echo "(no log)"
 
-      - name: "Upload artifacts"
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -104,6 +81,6 @@ asyncio.run(test())
           path: output/
           retention-days: 7
 
-      - name: "Clean up"
+      - name: Clean up
         if: always()
         run: rm -rf output/ /tmp/ts_profile
