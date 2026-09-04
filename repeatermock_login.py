@@ -102,22 +102,42 @@ async def main():
                 break
     log(f"Using Chrome: {chrome}")
 
-    section("STEP 1: Launch nodriver browser")
-    browser = await uc.start(
-        browser_executable_path=chrome,
-        headless=False,
-        user_data_dir=PROFILE_DIR,
-        sandbox=False,
-        browser_args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--disable-software-rasterizer",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        ],
-    )
+    section("STEP 1: Launch nodriver browser (with retry)")
+    browser = None
+    for attempt in range(5):
+        try:
+            # Clean profile between retries
+            if attempt > 0:
+                import shutil
+                shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+                await asyncio.sleep(2)
+            log(f"Launch attempt {attempt+1}/5…")
+            browser = await uc.start(
+                browser_executable_path=chrome,
+                headless=False,
+                user_data_dir=PROFILE_DIR,
+                sandbox=False,
+                browser_args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1",
+                ],
+            )
+            log("✅ Browser launched!")
+            break
+        except Exception as e:
+            log(f"  Attempt {attempt+1} failed: {e}", "WARN")
+            if browser:
+                try: browser.stop()
+                except: pass
+                browser = None
+    if not browser:
+        log("❌ Failed to launch browser after 5 attempts", "ERROR")
+        return
     log("✅ Browser launched")
 
     try:
