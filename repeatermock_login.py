@@ -135,9 +135,21 @@ async def main():
         if token:
             log(f"✅ Auto-solved! Token (first 20): {token[:20]}…")
         else:
-            log("Not auto-solved, clicking widget…")
-            for attempt in range(5):
-                log(f"  Click attempt {attempt+1}/5")
+            log("Not auto-solved. Waiting + clicking (up to 10 attempts)…")
+            for attempt in range(10):
+                # Check for token first (maybe it auto-solved)
+                token = await page.evaluate("""
+                    (() => {
+                        if (window._tsToken) return window._tsToken;
+                        const inp = document.querySelector('#_ts_box [name="cf-turnstile-response"]');
+                        return (inp && inp.value) ? inp.value : null;
+                    })()
+                """)
+                if token:
+                    log(f"✅ Solved at attempt {attempt+1}! Token (first 20): {token[:20]}…")
+                    break
+
+                log(f"  Attempt {attempt+1}/10: clicking widget…")
                 rect = await page.evaluate("""
                     (() => {
                         for (const f of document.querySelectorAll('iframe')) {
@@ -153,29 +165,35 @@ async def main():
                 if rect:
                     cx = rect["x"] + 28 + random.uniform(-3, 3)
                     cy = rect["y"] + rect["h"] / 2 + random.uniform(-3, 3)
-                    log(f"    Clicking iframe at ({cx:.0f}, {cy:.0f})")
+                    log(f"    iframe at ({cx:.0f}, {cy:.0f}) size={rect['w']:.0f}x{rect['h']:.0f}")
                 else:
                     cx = 48 + random.uniform(-3, 3)
                     cy = 52 + random.uniform(-3, 3)
-                    log(f"    Clicking fixed pos ({cx:.0f}, {cy:.0f})")
+                    log(f"    no iframe, fixed pos ({cx:.0f}, {cy:.0f})")
 
                 await page.mouse.move(cx - 80, cy - 20)
                 await page.wait_for_timeout(200)
                 await page.mouse.move(cx, cy)
                 await page.wait_for_timeout(100)
                 await page.mouse.click(cx, cy)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(5000)  # wait 5s between attempts
 
-                token = await page.evaluate("""
+                # Check for errors in the widget
+                widget_state = await page.evaluate("""
                     (() => {
-                        if (window._tsToken) return window._tsToken;
-                        const inp = document.querySelector('#_ts_box [name="cf-turnstile-response"]');
-                        return (inp && inp.value) ? inp.value : null;
+                        const box = document.getElementById('_ts_box');
+                        if (!box) return 'no box';
+                        const iframe = box.querySelector('iframe');
+                        const inp = box.querySelector('[name="cf-turnstile-response"]');
+                        return {
+                            hasIframe: !!iframe,
+                            iframeSrc: iframe ? iframe.src.slice(0, 80) : null,
+                            tokenValue: inp ? inp.value.slice(0, 20) : null,
+                            boxHTML: box.innerHTML.slice(0, 200),
+                        };
                     })()
                 """)
-                if token:
-                    log(f"✅ Solved! Token (first 20): {token[:20]}…")
-                    break
+                log(f"    widget state: {widget_state}")
 
         if not token:
             log("❌ Failed to solve Turnstile after 5 attempts", "ERROR")
