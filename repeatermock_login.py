@@ -93,6 +93,7 @@ async def solve_and_login() -> dict:
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Googlebot/2.1"
         ),
         browser_args=[
+            "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--no-first-run",
