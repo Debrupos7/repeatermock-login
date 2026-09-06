@@ -69,7 +69,7 @@ def extract_token(html):
     """Extract Turnstile token from rendered HTML."""
     for pat in [r'name="cf-turnstile-response"[^>]*value="([^"]+)"',
                 r'value="([^"]+)"[^>]*name="cf-turnstile-response"']:
-    m = re.search(pat, html)
+        m = re.search(pat, html)
         if m and len(m.group(1)) > 100:
             return m.group(1)
     return None
