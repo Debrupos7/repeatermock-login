@@ -1,4 +1,4 @@
-name: RepeaterMock Login + Scrape
+name: RepeaterMock Login
 
 on:
   workflow_dispatch:
@@ -21,8 +21,10 @@ jobs:
       - name: Install dependencies
         run: pip install httpx
 
-      - name: Run login + scrape script
+      - name: Run login script
         env:
+          BRIGHTDATA_TOKEN: ${{ secrets.BRIGHTDATA_TOKEN }}
+          ZENROWS_API_KEY: ${{ secrets.ZENROWS_API_KEY }}
           SCRAPINGBEE_API_KEY: ${{ secrets.SCRAPINGBEE_API_KEY }}
           RM_EMAIL: ${{ secrets.RM_EMAIL }}
           RM_PASSWORD: ${{ secrets.RM_PASSWORD }}
