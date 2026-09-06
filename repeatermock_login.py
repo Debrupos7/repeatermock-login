@@ -117,8 +117,8 @@ async def solve_with_zenrows(cli):
     log(f"API Key: {ZENROWS_API_KEY[:20]}…")
     log("Premium proxy (residential) + JS rendering = 25 credits per request")
     
-    for attempt in range(5):
-        log(f"  Attempt {attempt+1}/5…")
+    for attempt in range(10):
+        log(f"  Attempt {attempt+1}/10…")
         r = await cli.get(
             "https://api.zenrows.com/v1/",
             params={
@@ -126,7 +126,7 @@ async def solve_with_zenrows(cli):
                 "apikey": ZENROWS_API_KEY,
                 "js_render": "true",
                 "premium_proxy": "true",
-                "wait": "20000",  # Wait 20s for Turnstile to solve
+                "wait": "25000",  # Wait 25s for Turnstile to solve
             },
             timeout=180.0,
         )
